@@ -1,0 +1,142 @@
+========================================
+BUG 记录 - 匹配成功后第二名玩家无法进入场景
+========================================
+
+【问题描述】
+两名玩家进行匹配时，只有先点击"开始匹配"的玩家能正常进入场景，
+后点击匹配的玩家会一直卡在匹配等待界面，无法收到匹配成功通知。
+
+========================================
+
+【BUG 原因】
+
+1. WebSocket Session 注册时序问题
+
+   匹配流程中，当第二名玩家点击"开始匹配"时，后端在该玩家的 HTTP 请求线程中
+   同步执行以下操作：
+   - 将第二名玩家加入 Redis 匹配池
+   - 发现与第一名玩家兼容，匹配成功
+   - 创建场景
+   - 通过 WebSocketSessionManager.sendToUser() 向双方发送 MATCHED 通知
+
+   问题在于：第二名玩家的 Friend WebSocket 连接的 @OnOpen 回调（负责注册 session）
+   可能还没有执行完成，HTTP 请求就已经开始处理匹配逻辑了。
+
+   具体时序：
+   T0: 第二名玩家的前端发起两个请求：
+       - WebSocket 连接请求（异步，需要握手）
+       - POST /match/join（HTTP 请求）
+   T1: HTTP 请求到达后端，开始处理匹配逻辑
+   T2: 匹配成功，调用 sendToUser() 发送通知
+   T3: 第一名玩家的 session 已注册 → 通知发送成功
+   T4: 第二名玩家的 session 尚未注册 → sendToUser() 返回 false → 通知丢失
+   T5: 第二名玩家的 WebSocket 握手完成，@OnOpen 执行，session 注册（但已经晚了）
+
+2. sendToUser() 静默失败
+
+   WebSocketSessionManager.sendToUser() 在 session 不存在或未打开时，
+   直接返回 false，不抛异常。调用方（MatchService）没有检查返回值，
+   也没有重试机制，导致通知被静默丢弃。
+
+========================================
+
+【解决方式】
+
+将匹配流程从"自动创建场景"改为"双方确认后创建场景"：
+
+1. 匹配成功后不立即创建场景，而是创建一个 MatchPair 对象记录双方信息和确认状态
+2. 通知双方"匹配成功"（无 sceneId），前端显示对手信息和"确认进入场景"按钮
+3. 双方各自点击"确认进入场景" → POST /match/confirm → 后端记录确认状态
+4. 当双方都确认后，后端才创建场景，并发送 SCENE_READY 通知（含 sceneId）
+5. 双方收到 SCENE_READY 后自动跳转到场景页面
+
+这样做的好处：
+- 消除了 WebSocket Session 注册时序问题（确认操作是用户主动触发的，此时 WS 早已连接）
+- 用户体验更好（可以先看到对手信息再决定是否进入）
+- 场景只在双方都准备好时才创建，避免单方面进入的空场景
+
+========================================
+
+【涉及文件】
+
+后端：
+- MatchService.java      — 新增 MatchPair 类、confirmMatch() 方法
+- MatchController.java   — 新增 POST /match/confirm 接口
+
+前端：
+- match.html             — 新增"确认进入场景"面板
+- match.js               — 处理 MATCHED / OPPONENT_CONFIRMED / SCENE_READY 消息
+
+========================================
+
+【教训】
+
+1. WebSocket @OnOpen 回调的执行时机不可控，不能假设 HTTP 请求处理时 session 已注册
+2. sendToUser() 这类"静默失败"的方法，调用方必须检查返回值或加重试机制
+3. 涉及多个异步通道（HTTP + WebSocket）的交互流程，应设计为"显式确认"模式，
+   而不是依赖隐式的时序假设
+
+========================================
+记录时间：2026-06-07
+========================================
+
+
+========================================
+BUG 记录 - 三人同时匹配的并发竞态问题
+========================================
+
+【问题描述】
+如果三名（或更多）玩家同时点击"开始匹配"，可能出现以下异常：
+1. 同一名玩家同时匹配到多个对手
+2. 创建多个重复的 MatchPair
+3. 匹配池中的玩家被多个线程同时操作，数据不一致
+
+========================================
+
+【BUG 原因】
+
+joinMatch() 方法中的 tryMatch() 和 removePlayerFromPool() 不是原子操作。
+多个 HTTP 请求线程可以同时进入匹配逻辑，导致竞态条件。
+
+具体时序（三人同时匹配）：
+
+Thread A (Player1):                Thread B (Player2):              Thread C (Player3):
+  加入 Redis                         加入 Redis                       加入 Redis
+  tryMatch → 找到 Player2            tryMatch → 找到 Player1          tryMatch → 找到 Player1
+  匹配成功！                          匹配成功！                        匹配成功！
+  创建 MatchPair(1,2)                创建 MatchPair(2,1)              创建 MatchPair(3,1)
+  移除 Player1, Player2              移除 Player2, Player1            移除 Player3, Player1
+
+结果：Player1 同时被 Player2 和 Player3 匹配，创建了多个 MatchPair。
+
+========================================
+
+【解决方式】
+
+给 joinMatch() 和 confirmMatch() 方法加 synchronized 关键字，
+保证匹配逻辑的原子性：
+
+    public synchronized void joinMatch(Long playerId) { ... }
+    public synchronized void confirmMatch(Long playerId) { ... }
+
+synchronized 确保同一时刻只有一个线程能执行匹配逻辑，
+避免多人同时匹配同一个对手的问题。
+
+========================================
+
+【涉及文件】
+
+后端：
+- MatchService.java — joinMatch() 和 confirmMatch() 加 synchronized
+
+========================================
+
+【教训】
+
+1. 涉及"先查后改"的业务逻辑（如：先查匹配池再移除），必须保证原子性
+2. Redis 操作本身是原子的，但 Java 代码中的多个 Redis 操作组合不是原子的
+3. 匹配场景天然存在并发问题，必须在代码层面加锁
+
+========================================
+记录时间：2026-06-08
+========================================

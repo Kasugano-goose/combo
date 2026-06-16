@@ -1,0 +1,188 @@
+<template>
+  <div class="home-body">
+    <div class="home-page">
+      <div class="home-header">
+        <h1>匹配</h1>
+        <div class="header-actions">
+          <router-link to="/home" class="secondary-button">返回主页</router-link>
+        </div>
+      </div>
+
+      <div class="match-container">
+        <div class="profile-card match-player-info">
+          <p class="card-label">我的信息</p>
+          <h2>{{ player.username }}</h2>
+          <div class="match-stat"><span>段位</span><strong>{{ rankName }}</strong></div>
+          <div class="match-stat"><span>积分</span><strong>{{ player.rankScore }}</strong></div>
+        </div>
+
+        <div class="profile-card match-control">
+          <!-- 空闲状态 -->
+          <div v-if="state === 'idle'" class="match-panel">
+            <div class="match-icon">🎮</div>
+            <p class="match-hint">准备好了吗？</p>
+            <button class="match-button" @click="handleJoin" :disabled="!connected">
+              开始匹配
+            </button>
+            <p v-if="!connected" class="match-hint" style="color:var(--error);">
+              正在连接匹配服务...
+            </p>
+          </div>
+
+          <!-- 等待中 -->
+          <div v-if="state === 'waiting'" class="match-panel">
+            <div class="match-icon spinning">⚔️</div>
+            <p class="match-hint">正在寻找对手...</p>
+            <div class="match-stats">
+              <div class="match-stat-item">
+                <span>在线等待</span>
+                <strong>{{ poolSize }}</strong>
+              </div>
+              <div class="match-stat-item">
+                <span>已等待</span>
+                <strong>{{ elapsed }}s</strong>
+              </div>
+              <div class="match-stat-item">
+                <span>剩余时间</span>
+                <strong>{{ remaining }}s</strong>
+              </div>
+            </div>
+            <button class="match-button match-cancel secondary-button" @click="handleLeave"
+              style="color:var(--error); border-color:var(--error);">
+              取消匹配
+            </button>
+          </div>
+
+          <!-- 匹配成功 -->
+          <div v-if="state === 'found'" class="match-panel">
+            <div class="match-icon">🎉</div>
+            <p class="match-hint">匹配成功！</p>
+            <div class="match-result-info">
+              <p><strong>对手：</strong>{{ opponent.name }}（ID: {{ opponent.id }}）</p>
+              <p><strong>对手积分：</strong>{{ opponent.score }}</p>
+            </div>
+            <div class="confirm-status">{{ confirmText }}</div>
+            <button class="match-button" @click="handleConfirm"
+              :disabled="confirmed">
+              {{ confirmed ? '等待对方确认...' : '确认进入场景' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { usePlayerStore } from '../stores/player'
+import { useWebSocket } from '../composables/useWebSocket'
+import { joinMatch, leaveMatch, getMatchStatus, confirmMatch } from '../api/match'
+
+const router = useRouter()
+const store = usePlayerStore()
+const player = ref(store.player || {})
+
+const rankNames = {
+  BRONZE: '青铜', SILVER: '白银', GOLD: '黄金',
+  PLATINUM: '铂金', DIAMOND: '钻石', MASTER: '大师'
+}
+const rankName = rankNames[player.value.rank] || '青铜'
+
+const state = ref('idle') // idle | waiting | found
+const poolSize = ref(0)
+const elapsed = ref(0)
+const remaining = ref(60)
+const confirmed = ref(false)
+const confirmText = ref('等待双方确认...')
+const opponent = ref({ id: 0, name: '', score: 0 })
+
+let pollTimer = null
+let joinTime = 0
+
+// WebSocket 接收匹配通知
+const { connected, connect, disconnect } = useWebSocket(`/ws/friend/${store.playerId}`, {
+  onMessage(data) {
+    if (data.type === 'MATCHED') {
+      state.value = 'found'
+      opponent.value = {
+        id: data.opponentId,
+        name: data.opponentName,
+        score: data.opponentScore
+      }
+      confirmed.value = false
+      confirmText.value = '等待双方确认...'
+      stopPolling()
+    } else if (data.type === 'OPPONENT_CONFIRMED') {
+      confirmText.value = '对方已确认，等待你的确认...'
+    } else if (data.type === 'SCENE_READY') {
+      router.push(`/scene?sceneId=${data.sceneId}`)
+    } else if (data.type === 'MATCH_TIMEOUT') {
+      state.value = 'idle'
+      stopPolling()
+    }
+  }
+})
+
+function startPolling() {
+  joinTime = Date.now()
+  pollTimer = setInterval(async () => {
+    try {
+      const status = await getMatchStatus()
+      poolSize.value = status.poolSize
+      elapsed.value = Math.floor((Date.now() - joinTime) / 1000)
+      remaining.value = Math.max(0, Math.floor((status.timeout - (Date.now() - joinTime)) / 1000))
+    } catch {
+      // 忽略轮询错误
+    }
+  }, 1000)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+async function handleJoin() {
+  try {
+    const status = await joinMatch()
+    poolSize.value = status.poolSize
+    state.value = 'waiting'
+    startPolling()
+  } catch (e) {
+    alert(e.message)
+  }
+}
+
+async function handleLeave() {
+  try {
+    await leaveMatch()
+    state.value = 'idle'
+    stopPolling()
+  } catch (e) {
+    alert(e.message)
+  }
+}
+
+async function handleConfirm() {
+  try {
+    await confirmMatch()
+    confirmed.value = true
+    confirmText.value = '已确认，等待对方...'
+  } catch (e) {
+    alert(e.message)
+  }
+}
+
+onMounted(() => {
+  connect()
+})
+
+onUnmounted(() => {
+  disconnect()
+  stopPolling()
+})
+</script>
