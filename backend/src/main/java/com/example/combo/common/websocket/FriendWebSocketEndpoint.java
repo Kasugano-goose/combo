@@ -46,8 +46,8 @@ public class FriendWebSocketEndpoint {
         }
 
         // 注册到会话管理器
-        sessionManager.register(playerId, session);
-        log.info("玩家 {} 已连接 WebSocket，当前在线: {}", playerId, sessionManager.getOnlineCount());
+        sessionManager.register(playerId, "friend", session);
+        log.info("玩家 {} 已连接好友 WebSocket，当前在线: {}", playerId, sessionManager.getOnlineCount());
     }
 
     /**
@@ -55,8 +55,8 @@ public class FriendWebSocketEndpoint {
      */
     @OnClose
     public void onClose(@PathParam("playerId") Long playerId) {
-        sessionManager.unregister(playerId);
-        log.info("玩家 {} 已断开 WebSocket，当前在线: {}", playerId, sessionManager.getOnlineCount());
+        sessionManager.unregister(playerId, "friend");
+        log.info("玩家 {} 已断开好友 WebSocket，当前在线: {}", playerId, sessionManager.getOnlineCount());
     }
 
     /**
@@ -73,7 +73,7 @@ public class FriendWebSocketEndpoint {
      */
     @OnError
     public void onError(Throwable error, @PathParam("playerId") Long playerId) {
-        log.error("玩家 {} 的 WebSocket 发生错误: {}", playerId, error.getMessage());
-        sessionManager.unregister(playerId);
+        log.error("玩家 {} 的好友 WebSocket 发生错误: {}", playerId, error.getMessage());
+        sessionManager.unregister(playerId, "friend");
     }
 }

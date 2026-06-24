@@ -121,6 +121,11 @@ const { connected, connect, disconnect } = useWebSocket(`/ws/friend/${store.play
     } else if (data.type === 'MATCH_TIMEOUT') {
       state.value = 'idle'
       stopPolling()
+    } else if (data.type === 'CONFIRM_TIMEOUT') {
+      // 确认超时，回到空闲状态
+      state.value = 'idle'
+      confirmed.value = false
+      alert(data.message || '确认超时，匹配已取消，请重新匹配')
     }
   }
 })

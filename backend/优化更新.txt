@@ -1,0 +1,69 @@
+[优化项目一]
+解决分布式部署：
+
+当前的问题：
+1.当前匹配对使用的ConcurrentHashMap在分布式部署有数据一致性问题。
+2.ConcurrenHashMap在单机并发情况下，但在分布式情况下确实是短板。
+
+
+解决方案：
+1.将内存中的匹配对存入redis中，使用Hash来存储匹配对。
+2.使用TTL超时清理过期的匹配对。
+
+状态：✅ 已完成
+完成时间：2026-06-24
+改动内容：
+- 移除 ConcurrentHashMap<Long, MatchPair> matchPairs
+- 新增 Redis Key: match:pair:{uuid} (Hash, TTL 30s)
+- 新增 Redis Key: match:player:pair:{playerId} (String, TTL 30s)
+- 使用 Lua 脚本 (confirm.lua) 保证确认操作的原子性
+- 新增定时任务 cleanExpiredMatchPairIndexes 清理残留索引
+
+
+[优化项目二]
+替换synchronized关键字，改为使用分布式锁保证匹配行为的原子性：
+
+问题：
+synchronized 仅在单机生效，分布式部署下无法跨 JVM 保护并发。
+
+解决方案：
+1. 基于 Redis SETNX 实现分布式锁
+2. 使用 Lua 脚本 (unlock.lua) 保证锁释放的原子性
+3. 使用 Lua 脚本 (match_and_remove.lua) 保证匹配移除的原子性
+
+状态：✅ 已完成
+完成时间：2026-06-24
+改动内容：
+- 移除 joinMatch() 和 confirmMatch() 上的 synchronized 关键字
+- 新增分布式锁方法 tryLock() / unlock()
+- 锁 Key: lock:match:player:{playerId}，玩家级粒度
+- 锁等待超时 3s，持有超时 5s（自动过期防死锁）
+- confirmMatch() 无需加锁（Lua 脚本保证原子性）
+
+
+[优化项目三]
+修复 WebSocket Session 覆盖问题：
+
+问题：
+ChatWebSocketEndpoint 和 FriendWebSocketEndpoint 使用同一个 playerId 注册 session，
+后注册的会覆盖先注册的，导致收不到某些通知。
+
+解决方案：
+WebSocketSessionManager 改为支持多端点的结构。
+
+状态：✅ 已完成
+完成时间：2026-06-24
+改动内容：
+- 数据结构从 ConcurrentHashMap<Long, Session> 改为 ConcurrentHashMap<Long, Map<String, Session>>
+- register() 方法新增 endpointType 参数（"chat", "friend", "scene"）
+- unregister() 方法新增 endpointType 参数
+- sendToUser() 遍历所有端点发送消息
+- 新增 sendToEndpoint() 方法支持向特定端点发送
+
+
+[优化项目四]
+引入Netty网关：
+
+
+[优化项目五]
+替换JSON数据，改为Protobuf：

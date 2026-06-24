@@ -7,20 +7,27 @@ import com.example.combo.scene.service.SceneService;
 import com.example.combo.player.repository.PlayerRepository;
 import com.example.combo.player.service.PlayerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -35,92 +42,140 @@ public class MatchService {
 
     private static final String MATCH_POOL_KEY = "match:pool";
     private static final String MATCH_PLAYER_PREFIX = "match:player:";
+    private static final String MATCH_PAIR_PREFIX = "match:pair:";
+    private static final String MATCH_PLAYER_PAIR_PREFIX = "match:player:pair:";
+    private static final String MATCH_LOCK_PREFIX = "lock:match:player:";
     private static final long MATCH_TIMEOUT_MS = 60000L;
+    private static final long MATCH_PAIRS_TTL_SECONDS = 30L;
+    private static final long LOCK_WAIT_TIMEOUT_MS = 3000L;
+    private static final long LOCK_HOLD_TIMEOUT_SECONDS = 5L;
 
-    private final ConcurrentHashMap<Long, Long> waitingPlayers = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
 
-    // ===== 新增：匹配确认机制 =====
-    // 匹配对：key=任意一方playerId, value=MatchPair（包含双方ID和确认状态）
-    private final ConcurrentHashMap<Long, MatchPair> matchPairs = new ConcurrentHashMap<>();
+    private RedisScript<Long> confirmScript;
+    private RedisScript<Long> matchAndRemoveScript;
+    private RedisScript<Long> unlockScript;
+
+    @PostConstruct
+    public void init() {
+        // 加载 Lua 脚本
+        this.confirmScript = loadScript("lua/confirm.lua");
+        this.matchAndRemoveScript = loadScript("lua/match_and_remove.lua");
+        this.unlockScript = loadScript("lua/unlock.lua");
+        log.info("MatchService 初始化完成，Lua 脚本已加载");
+    }
+
+    private RedisScript<Long> loadScript(String path) {
+        ClassPathResource resource = new ClassPathResource(path);
+        return RedisScript.of(resource, Long.class);
+    }
+
+    // ===== 分布式锁实现 =====
 
     /**
-     * 匹配对数据结构
+     * 尝试获取分布式锁
+     * @param lockKey 锁的 key
+     * @param lockValue 锁的 value（用于标识持有者）
+     * @param waitTimeout 等待超时时间（毫秒）
+     * @param holdTimeout 锁持有时间（秒）
+     * @return 锁的 value，获取失败返回 null
      */
-    public static class MatchPair {
-        public Long player1Id;
-        public Long player2Id;
-        public volatile boolean player1Confirmed = false;
-        public volatile boolean player2Confirmed = false;
-
-        public MatchPair(Long p1, Long p2) {
-            this.player1Id = p1;
-            this.player2Id = p2;
+    private String tryLock(String lockKey, String lockValue, long waitTimeout, long holdTimeout) {
+        long deadline = System.currentTimeMillis() + waitTimeout;
+        while (System.currentTimeMillis() < deadline) {
+            Boolean success = redisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, lockValue, Duration.ofSeconds(holdTimeout));
+            if (Boolean.TRUE.equals(success)) {
+                return lockValue;
+            }
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
         }
+        return null;
+    }
 
-        public Long getOpponentId(Long playerId) {
-            return player1Id.equals(playerId) ? player2Id : player1Id;
-        }
-
-        public boolean isConfirmed(Long playerId) {
-            return player1Id.equals(playerId) ? player1Confirmed : player2Confirmed;
-        }
-
-        public void confirm(Long playerId) {
-            if (player1Id.equals(playerId)) player1Confirmed = true;
-            else player2Confirmed = true;
-        }
-
-        public boolean isBothConfirmed() {
-            return player1Confirmed && player2Confirmed;
+    /**
+     * 释放分布式锁（仅释放自己持有的锁，使用 Lua 脚本保证原子性）
+     * @param lockKey 锁的 key
+     * @param lockValue 锁的 value（用于验证持有者）
+     */
+    private void unlock(String lockKey, String lockValue) {
+        List<String> keys = Arrays.asList(lockKey);
+        Long result = redisTemplate.execute(unlockScript, keys, lockValue);
+        if (result != null && result == 1) {
+            log.debug("释放锁成功: {}", lockKey);
         }
     }
 
     /**
-     * 加入匹配池（synchronized 防止并发竞态：多人同时匹配时保证原子性）
+     * 加入匹配池（使用分布式锁防止并发竞态）
      */
-    public synchronized void joinMatch(Long playerId) {
-        Player player = playerRepository.findById(playerId)
-                .orElseThrow(() -> new IllegalArgumentException("玩家不存在"));
+    public void joinMatch(Long playerId) {
+        String lockKey = MATCH_LOCK_PREFIX + playerId;
+        String lockValue = UUID.randomUUID().toString();
 
-        if (player.getStatus() != Player.PlayerStatus.NORMAL) {
-            throw new IllegalArgumentException("玩家状态异常，无法匹配");
+        if (tryLock(lockKey, lockValue, LOCK_WAIT_TIMEOUT_MS, LOCK_HOLD_TIMEOUT_SECONDS) == null) {
+            throw new RuntimeException("系统繁忙，请稍后重试");
         }
 
-        Double score = redisTemplate.opsForZSet().score(MATCH_POOL_KEY, playerId.toString());
-        if (score != null) {
-            throw new IllegalArgumentException("你已在匹配池中，请耐心等待");
+        try {
+            Player player = playerRepository.findById(playerId)
+                    .orElseThrow(() -> new IllegalArgumentException("玩家不存在"));
+
+            if (player.getStatus() != Player.PlayerStatus.NORMAL) {
+                throw new IllegalArgumentException("玩家状态异常，无法匹配");
+            }
+
+            Double score = redisTemplate.opsForZSet().score(MATCH_POOL_KEY, playerId.toString());
+            if (score != null) {
+                throw new IllegalArgumentException("你已在匹配池中，请耐心等待");
+            }
+
+            long now = System.currentTimeMillis();
+            redisTemplate.opsForZSet().add(MATCH_POOL_KEY, playerId.toString(), (double) now);
+
+            String playerKey = MATCH_PLAYER_PREFIX + playerId;
+            Map<String, String> playerInfo = new HashMap<>();
+            playerInfo.put("username", player.getUsername());
+            playerInfo.put("rankScore", String.valueOf(player.getRankScore()));
+            playerInfo.put("rankLevel", String.valueOf(player.getCurrentRank().getLevel()));
+            playerInfo.put("selectedRoleId", String.valueOf(player.getSelectedRoleId()));
+            redisTemplate.opsForHash().putAll(playerKey, playerInfo);
+
+            log.info("玩家 {} 加入匹配池，当前匹配池人数: {}", playerId, getWaitingCount());
+
+            tryMatch(player);
+        } finally {
+            unlock(lockKey, lockValue);
         }
-
-        long now = System.currentTimeMillis();
-        redisTemplate.opsForZSet().add(MATCH_POOL_KEY, playerId.toString(), (double) now);
-
-        String playerKey = MATCH_PLAYER_PREFIX + playerId;
-        Map<String, String> playerInfo = new HashMap<>();
-        playerInfo.put("username", player.getUsername());
-        playerInfo.put("rankScore", String.valueOf(player.getRankScore()));
-        playerInfo.put("rankLevel", String.valueOf(player.getCurrentRank().getLevel()));
-        playerInfo.put("selectedRoleId", String.valueOf(player.getSelectedRoleId()));
-        redisTemplate.opsForHash().putAll(playerKey, playerInfo);
-
-        waitingPlayers.put(playerId, now);
-        log.info("玩家 {} 加入匹配池，当前匹配池人数: {}", playerId, getWaitingCount());
-
-        tryMatch(player);
     }
 
     /**
-     * 退出匹配池
+     * 退出匹配池（使用分布式锁确保与 joinMatch 互斥）
      */
     public void leaveMatch(Long playerId) {
-        redisTemplate.opsForZSet().remove(MATCH_POOL_KEY, playerId.toString());
-        redisTemplate.delete(MATCH_PLAYER_PREFIX + playerId);
-        waitingPlayers.remove(playerId);
-        log.info("玩家 {} 退出匹配池，当前匹配池人数: {}", playerId, getWaitingCount());
+        String lockKey = MATCH_LOCK_PREFIX + playerId;
+        String lockValue = UUID.randomUUID().toString();
+
+        if (tryLock(lockKey, lockValue, LOCK_WAIT_TIMEOUT_MS, LOCK_HOLD_TIMEOUT_SECONDS) == null) {
+            throw new RuntimeException("系统繁忙，请稍后重试");
+        }
+
+        try {
+            redisTemplate.opsForZSet().remove(MATCH_POOL_KEY, playerId.toString());
+            redisTemplate.delete(MATCH_PLAYER_PREFIX + playerId);
+            log.info("玩家 {} 退出匹配池，当前匹配池人数: {}", playerId, getWaitingCount());
+        } finally {
+            unlock(lockKey, lockValue);
+        }
     }
 
     /**
-     * 尝试匹配
+     * 尝试匹配（使用 Lua 脚本保证原子性移除双方）
      */
     private void tryMatch(Player player) {
         Set<String> allMembers = redisTemplate.opsForZSet().reverseRange(MATCH_POOL_KEY, 0, -1);
@@ -137,16 +192,25 @@ public class MatchService {
             }
 
             if (playerService.canMatchWith(player, opponent)) {
-                // 匹配成功，双方移出匹配池
-                removePlayerFromPool(player.getId());
-                removePlayerFromPool(opponentId);
+                // 使用 Lua 脚本原子性地检查并移除双方
+                String playerKey = MATCH_PLAYER_PREFIX + player.getId();
+                String opponentKey = MATCH_PLAYER_PREFIX + opponentId;
+                List<String> keys = Arrays.asList(MATCH_POOL_KEY, playerKey, opponentKey);
+                Long result = redisTemplate.execute(
+                        matchAndRemoveScript, keys,
+                        player.getId().toString(), opponentId.toString()
+                );
+
+                if (result == null || result == 0) {
+                    // 对手已被其他人匹配，继续尝试下一个
+                    log.info("玩家 {} 已被其他人匹配，跳过", opponentId);
+                    continue;
+                }
 
                 log.info("匹配成功！玩家 {} 与玩家 {}", player.getId(), opponentId);
 
-                // 创建匹配对（不创建场景，等双方确认）
-                MatchPair pair = new MatchPair(player.getId(), opponentId);
-                matchPairs.put(player.getId(), pair);
-                matchPairs.put(opponentId, pair);
+                // 创建匹配对存储到 Redis
+                createMatchPairInRedis(player.getId(), opponentId);
 
                 // 通知双方匹配成功（无 sceneId）
                 notifyMatchFound(player, opponent);
@@ -159,49 +223,143 @@ public class MatchService {
     }
 
     /**
-     * 玩家确认进入场景（synchronized 防止两人同时确认时竞态）
+     * 在 Redis 中创建匹配对
      */
-    public synchronized void confirmMatch(Long playerId) {
-        MatchPair pair = matchPairs.get(playerId);
-        if (pair == null) {
+    private void createMatchPairInRedis(Long player1Id, Long player2Id) {
+        String pairId = UUID.randomUUID().toString();
+        String pairKey = MATCH_PAIR_PREFIX + pairId;
+        String player1Key = MATCH_PLAYER_PAIR_PREFIX + player1Id;
+        String player2Key = MATCH_PLAYER_PAIR_PREFIX + player2Id;
+
+        // 存储匹配对详情
+        Map<String, String> pairData = new HashMap<>();
+        pairData.put("player1Id", player1Id.toString());
+        pairData.put("player2Id", player2Id.toString());
+        pairData.put("player1Confirmed", "0");
+        pairData.put("player2Confirmed", "0");
+        pairData.put("createdAt", String.valueOf(System.currentTimeMillis()));
+
+        redisTemplate.opsForHash().putAll(pairKey, pairData);
+        redisTemplate.expire(pairKey, Duration.ofSeconds(MATCH_PAIRS_TTL_SECONDS));
+
+        // 存储玩家索引
+        redisTemplate.opsForValue().set(player1Key, pairId, MATCH_PAIRS_TTL_SECONDS);
+        redisTemplate.opsForValue().set(player2Key, pairId, MATCH_PAIRS_TTL_SECONDS);
+
+        log.info("创建匹配对 Redis: pairId={}, player1={}, player2={}", pairId, player1Id, player2Id);
+    }
+
+    /**
+     * 玩家确认进入场景（使用 Lua 脚本保证原子性）
+     */
+    public void confirmMatch(Long playerId) {
+        String playerKey = MATCH_PLAYER_PAIR_PREFIX + playerId;
+        String pairId = redisTemplate.opsForValue().get(playerKey);
+
+        if (pairId == null) {
             throw new IllegalArgumentException("没有待确认的匹配");
         }
 
-        if (pair.isConfirmed(playerId)) {
-            throw new IllegalArgumentException("你已确认，等待对方确认");
+        String pairKey = MATCH_PAIR_PREFIX + pairId;
+
+        // 执行 Lua 脚本
+        List<String> keys = Arrays.asList(pairKey, playerKey);
+        Long result = redisTemplate.execute(confirmScript, keys, playerId.toString());
+
+        if (result == null) {
+            throw new RuntimeException("Redis 执行异常");
         }
 
-        pair.confirm(playerId);
-        log.info("玩家 {} 已确认进入场景", playerId);
+        log.info("玩家 {} 确认匹配，Lua 返回结果: {}", playerId, result);
 
-        // 通知对手：对方已确认
-        Long opponentId = pair.getOpponentId(playerId);
-        notifyOpponentConfirmed(opponentId);
-
-        // 检查是否双方都确认了
-        if (pair.isBothConfirmed()) {
-            log.info("双方都已确认，创建场景 {} 和 {}", pair.player1Id, pair.player2Id);
-
-            // 清理匹配对
-            matchPairs.remove(pair.player1Id);
-            matchPairs.remove(pair.player2Id);
-
-            // 查找玩家信息
-            Player player1 = playerRepository.findById(pair.player1Id).orElse(null);
-            Player player2 = playerRepository.findById(pair.player2Id).orElse(null);
-
-            if (player1 == null || player2 == null) {
-                log.error("创建场景失败：玩家不存在");
-                return;
-            }
-
-            // 创建场景
-            Scene scene = sceneService.createScene(player1, player2);
-
-            // 通知双方进入场景
-            notifySceneReady(pair.player1Id, scene.getSceneId());
-            notifySceneReady(pair.player2Id, scene.getSceneId());
+        switch (result.intValue()) {
+            case -1:
+                throw new IllegalArgumentException("匹配对已超时或不存在");
+            case -2:
+                throw new IllegalArgumentException("你不属于该匹配对");
+            case 0:
+                throw new IllegalArgumentException("你已确认，等待对方确认");
+            case 1:
+                // 双方都已确认，创建场景
+                log.info("双方都已确认，创建场景");
+                handleBothConfirmed(pairKey, playerId);
+                break;
+            case 2:
+                // 仅当前玩家确认，通知对手
+                log.info("玩家 {} 已确认，等待对方确认", playerId);
+                Long opponentId = getOpponentIdFromPair(pairKey, playerId);
+                if (opponentId != null) {
+                    notifyOpponentConfirmed(opponentId);
+                }
+                break;
+            default:
+                log.error("未知的 Lua 返回值: {}", result);
+                throw new RuntimeException("未知的确认结果");
         }
+    }
+
+    /**
+     * 从匹配对中获取对手 ID
+     */
+    private Long getOpponentIdFromPair(String pairKey, Long playerId) {
+        Map<Object, Object> pairData = redisTemplate.opsForHash().entries(pairKey);
+
+        if (pairData.isEmpty()) {
+            return null;
+        }
+
+        Long player1Id = Long.parseLong(pairData.get("player1Id").toString());
+        Long player2Id = Long.parseLong(pairData.get("player2Id").toString());
+
+        return player1Id.equals(playerId) ? player2Id : player1Id;
+    }
+
+    /**
+     * 处理双方都确认的情况：创建场景并通知
+     */
+    private void handleBothConfirmed(String pairKey, Long confirmPlayerId) {
+        // 从临时 key 获取玩家信息
+        String tempKey = "match:temp:confirmed:" + pairKey;
+        String playerIds = redisTemplate.opsForValue().get(tempKey);
+
+        if (playerIds == null) {
+            log.error("无法获取匹配对玩家信息，临时 key 已过期: {}", tempKey);
+            return;
+        }
+
+        // 解析玩家 ID
+        String[] ids = playerIds.split(":");
+        Long player1Id = Long.parseLong(ids[0]);
+        Long player2Id = Long.parseLong(ids[1]);
+
+        // 删除临时 key
+        redisTemplate.delete(tempKey);
+
+        // 查找玩家信息
+        Player player1 = playerRepository.findById(player1Id).orElse(null);
+        Player player2 = playerRepository.findById(player2Id).orElse(null);
+
+        if (player1 == null || player2 == null) {
+            log.error("创建场景失败：玩家不存在 player1={}, player2={}", player1Id, player2Id);
+            return;
+        }
+
+        // 创建场景
+        Scene scene = sceneService.createScene(player1, player2);
+
+        // 通知双方进入场景
+        notifySceneReady(player1Id, scene.getSceneId());
+        notifySceneReady(player2Id, scene.getSceneId());
+    }
+
+    /**
+     * 通知匹配对超时
+     */
+    public void notifyConfirmTimeout(Long playerId) {
+        Map<String, Object> notification = new HashMap<>();
+        notification.put("type", "CONFIRM_TIMEOUT");
+        notification.put("message", "确认超时，匹配已取消，请重新匹配");
+        sendWithRetry(playerId, notification);
     }
 
     /**
@@ -210,7 +368,6 @@ public class MatchService {
     private void removePlayerFromPool(Long playerId) {
         redisTemplate.opsForZSet().remove(MATCH_POOL_KEY, playerId.toString());
         redisTemplate.delete(MATCH_PLAYER_PREFIX + playerId);
-        waitingPlayers.remove(playerId);
     }
 
     // ===== 通知方法 =====
@@ -299,6 +456,36 @@ public class MatchService {
             log.info("玩家 {} 匹配超时", playerId);
             removePlayerFromPool(playerId);
             notifyMatchTimeout(playerId);
+        }
+    }
+
+    /**
+     * 定时清理残留的玩家索引（当匹配对已过期但索引未清理时）
+     */
+    @Scheduled(fixedRate = 10000)
+    public void cleanExpiredMatchPairIndexes() {
+        Set<String> playerKeys = redisTemplate.keys(MATCH_PLAYER_PAIR_PREFIX + "*");
+        if (playerKeys == null || playerKeys.isEmpty()) return;
+
+        for (String playerKey : playerKeys) {
+            String pairId = redisTemplate.opsForValue().get(playerKey);
+            if (pairId == null) {
+                // 索引值为空，删除
+                redisTemplate.delete(playerKey);
+                continue;
+            }
+
+            String pairKey = MATCH_PAIR_PREFIX + pairId;
+            Boolean pairExists = redisTemplate.hasKey(pairKey);
+
+            if (pairExists == null || !pairExists) {
+                // 匹配对已不存在（已过期），删除残留索引并通知超时
+                String playerIdStr = playerKey.replace(MATCH_PLAYER_PAIR_PREFIX, "");
+                Long playerId = Long.parseLong(playerIdStr);
+                redisTemplate.delete(playerKey);
+                log.info("清理残留匹配索引: playerId={}", playerId);
+                notifyConfirmTimeout(playerId);
+            }
         }
     }
 

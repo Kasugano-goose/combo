@@ -39,7 +39,7 @@ public class ChatWebSocketEndpoint {
             }
             return;
         }
-        webSocketSessionManager.register(playerId, session);
+        webSocketSessionManager.register(playerId, "chat", session);
         log.info("玩家 {} 已连接聊天WebSocket，当前在线: {}", playerId, webSocketSessionManager.getOnlineCount());
     }
 
@@ -51,13 +51,13 @@ public class ChatWebSocketEndpoint {
 
     @OnClose
     public void onClose(@PathParam("playerId") Long playerId) {
-        webSocketSessionManager.unregister(playerId);
+        webSocketSessionManager.unregister(playerId, "chat");
         log.info("玩家 {} 已断开聊天WebSocket，当前在线: {}", playerId, webSocketSessionManager.getOnlineCount());
     }
 
     @OnError
     public void onError(Session session, @PathParam("playerId") Long playerId, Throwable error) {
         log.error("玩家 {} 的聊天WebSocket发生错误: {}", playerId, error.getMessage());
-        webSocketSessionManager.unregister(playerId);
+        webSocketSessionManager.unregister(playerId, "chat");
     }
 }
