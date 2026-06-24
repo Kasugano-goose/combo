@@ -21,7 +21,8 @@
 - 60 秒匹配超时自动清理
 - **双方确认机制**：匹配成功后双方需各自确认才能进入场景
 - 30 秒确认超时自动取消
-- synchronized 保证并发安全
+- **分布式锁**：基于 Redis SETNX 实现，支持多实例部署
+- **Lua 脚本**：保证匹配确认、匹配移除、锁释放的原子性
 
 ### 聊天系统
 - 基于 WebSocket 的实时聊天
@@ -42,7 +43,7 @@
 - **框架**: Spring Boot 4.0.6
 - **语言**: Java 17
 - **数据库**: MySQL 8.0+（玩家、好友关系等持久化数据）
-- **缓存**: Redis（匹配池：Sorted Set + Hash）
+- **缓存**: Redis（匹配池、匹配对、分布式锁、Lua 脚本）
 - **实时通信**: WebSocket（JSR 356 @ServerEndpoint）
 - **ORM**: Spring Data JPA (Hibernate)
 - **构建工具**: Maven
@@ -95,7 +96,11 @@ combo/
 │   ├── src/main/resources/
 │   │   ├── application.properties  # 应用配置
 │   │   ├── schema.sql              # 数据库表结构
-│   │   └── data.sql                # 种子数据
+│   │   ├── data.sql                # 种子数据
+│   │   └── lua/                    # Redis Lua 脚本
+│   │       ├── confirm.lua         # 匹配确认原子操作
+│   │       ├── match_and_remove.lua # 原子匹配移除
+│   │       └── unlock.lua          # 原子释放锁
 │   └── pom.xml
 ├── frontend/                       # 前端项目
 │   ├── src/
@@ -242,8 +247,11 @@ Player2 加入匹配池 → 匹配成功
 详见 `backend/bug记录.txt`，包含以下问题的分析和解决方案：
 
 1. WebSocket Session 注册时序问题 → 改为双方确认机制
-2. 三人同时匹配的并发竞态 → synchronized 加锁
-3. 确认阶段无超时 → 定时清理过期 MatchPair
+2. 三人同时匹配的并发竞态 → 分布式锁 + Lua 脚本原子操作
+3. 确认阶段无超时 → Redis TTL 自动过期 + 定时清理残留索引
+4. ConcurrentHashMap 分布式不共享 → 迁移到 Redis 存储
+5. synchronized 跨 JVM 无效 → 基于 Redis SETNX 的分布式锁
+6. WebSocket Session 覆盖 → 支持多端点的 SessionManager
 
 ## 📝 API 接口
 
