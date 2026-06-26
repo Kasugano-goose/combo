@@ -50,14 +50,14 @@ public class ChatWebSocketEndpoint {
     }
 
     @OnClose
-    public void onClose(@PathParam("playerId") Long playerId) {
-        webSocketSessionManager.unregister(playerId, "chat");
+    public void onClose(Session session, @PathParam("playerId") Long playerId) {
+        webSocketSessionManager.unregister(playerId, "chat", session);
         log.info("玩家 {} 已断开聊天WebSocket，当前在线: {}", playerId, webSocketSessionManager.getOnlineCount());
     }
 
     @OnError
     public void onError(Session session, @PathParam("playerId") Long playerId, Throwable error) {
         log.error("玩家 {} 的聊天WebSocket发生错误: {}", playerId, error.getMessage());
-        webSocketSessionManager.unregister(playerId, "chat");
+        webSocketSessionManager.unregister(playerId, "chat", session);
     }
 }
