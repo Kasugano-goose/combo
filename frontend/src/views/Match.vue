@@ -101,47 +101,121 @@ const opponent = ref({ id: 0, name: '', score: 0 })
 let pollTimer = null
 let joinTime = 0
 
+// 通用状态切换：清理所有定时器
+function resetToIdle() {
+  state.value = 'idle'
+  confirmed.value = false
+  opponent.value = { id: 0, name: '', score: 0 }
+  stopPolling()
+}
+
+// 切换到匹配成功状态（统一入口，避免遗漏清理）
+function switchToFound(opponentInfo, yourConfirmed = false, opponentConfirmed = false) {
+  if (state.value === 'found') {
+    console.log('[Match] 已在 found 状态，忽略重复切换')
+    return
+  }
+  state.value = 'found'
+  opponent.value = opponentInfo
+  confirmed.value = yourConfirmed
+  confirmText.value = opponentConfirmed ? '对方已确认，等待你的确认...' : '等待双方确认...'
+  stopPolling()
+  console.log('[Match] 切换到 found 状态，对手:', opponentInfo)
+}
+
 // WebSocket 接收匹配通知
 const { connected, connect, disconnect } = useWebSocket(`/ws/friend/${store.playerId}`, {
   onMessage(data) {
+    console.log('[Match] 收到 WebSocket 消息:', data.type, data)
     if (data.type === 'MATCHED') {
-      state.value = 'found'
-      opponent.value = {
-        id: data.opponentId,
-        name: data.opponentName,
-        score: data.opponentScore
-      }
-      confirmed.value = false
-      confirmText.value = '等待双方确认...'
-      stopPolling()
+      switchToFound(
+        { id: data.opponentId, name: data.opponentName, score: data.opponentScore },
+        false, false
+      )
     } else if (data.type === 'OPPONENT_CONFIRMED') {
-      confirmText.value = '对方已确认，等待你的确认...'
+      if (state.value === 'found') {
+        confirmText.value = '对方已确认，等待你的确认...'
+      }
     } else if (data.type === 'SCENE_READY') {
+      stopPolling()
       router.push(`/scene?sceneId=${data.sceneId}`)
     } else if (data.type === 'MATCH_TIMEOUT') {
-      state.value = 'idle'
-      stopPolling()
+      console.log('[Match] 收到匹配超时通知')
+      resetToIdle()
     } else if (data.type === 'CONFIRM_TIMEOUT') {
-      // 确认超时，回到空闲状态
-      state.value = 'idle'
-      confirmed.value = false
+      console.log('[Match] 收到确认超时通知')
+      resetToIdle()
       alert(data.message || '确认超时，匹配已取消，请重新匹配')
+    }
+  },
+  // 重连后主动查询匹配状态（补偿断线期间可能丢失的通知）
+  onOpen() {
+    console.log('[Match] WebSocket 已连接，当前状态:', state.value)
+    if (state.value === 'waiting' || state.value === 'found') {
+      checkMatchStatusFallback()
     }
   }
 })
 
+// 重连后主动查询匹配状态（兜底）
+async function checkMatchStatusFallback() {
+  try {
+    const status = await getMatchStatus(store.playerId)
+    console.log('[Match] 重连后查询状态:', status)
+    applyMatchStatus(status)
+  } catch (e) {
+    console.error('[Match] 重连后查询状态失败:', e)
+  }
+}
+
+// 根据 /match/status 响应更新状态（统一逻辑，轮询和重连共用）
+function applyMatchStatus(status) {
+  // 发现有待确认的匹配对
+  if (status.hasPendingMatch) {
+    if (state.value !== 'found') {
+      console.warn('[Match] 通过轮询/重连发现匹配结果', status)
+      switchToFound(
+        { id: status.opponentId, name: status.opponentName, score: status.opponentScore },
+        status.yourConfirmed || false,
+        status.opponentConfirmed || false
+      )
+    }
+    return
+  }
+
+  // 不在池中也没有匹配对 → 超时或被取消
+  if (!status.inPool && !status.hasPendingMatch) {
+    if (state.value === 'waiting') {
+      console.warn('[Match] 匹配已超时或被取消')
+      resetToIdle()
+    }
+    return
+  }
+
+  // 在池中，更新等待信息
+  if (status.inPool) {
+    poolSize.value = status.poolSize
+  }
+}
+
 function startPolling() {
   joinTime = Date.now()
   pollTimer = setInterval(async () => {
+    // 如果已经不在 waiting 状态，停止轮询
+    if (state.value !== 'waiting') {
+      stopPolling()
+      return
+    }
     try {
-      const status = await getMatchStatus()
-      poolSize.value = status.poolSize
+      const status = await getMatchStatus(store.playerId)
+      console.log('[轮询] /match/status 返回:', JSON.stringify(status))
       elapsed.value = Math.floor((Date.now() - joinTime) / 1000)
       remaining.value = Math.max(0, Math.floor((status.timeout - (Date.now() - joinTime)) / 1000))
-    } catch {
-      // 忽略轮询错误
+      applyMatchStatus(status)
+    } catch (e) {
+      console.error('[轮询] /match/status 请求失败:', e.message)
     }
-  }, 1000)
+  }, 2000)
 }
 
 function stopPolling() {
@@ -154,10 +228,12 @@ function stopPolling() {
 async function handleJoin() {
   try {
     const status = await joinMatch()
+    console.log('[Match] 加入匹配池成功:', JSON.stringify(status))
     poolSize.value = status.poolSize
     state.value = 'waiting'
     startPolling()
   } catch (e) {
+    console.error('[Match] 加入匹配池失败:', e.message)
     alert(e.message)
   }
 }
@@ -165,8 +241,7 @@ async function handleJoin() {
 async function handleLeave() {
   try {
     await leaveMatch()
-    state.value = 'idle'
-    stopPolling()
+    resetToIdle()
   } catch (e) {
     alert(e.message)
   }

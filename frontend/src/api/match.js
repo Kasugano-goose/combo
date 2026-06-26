@@ -8,8 +8,8 @@ export function leaveMatch() {
   return request.post('/match/leave')
 }
 
-export function getMatchStatus() {
-  return request.get('/match/status')
+export function getMatchStatus(playerId) {
+  return request.get('/match/status', { params: { playerId } })
 }
 
 export function confirmMatch() {
