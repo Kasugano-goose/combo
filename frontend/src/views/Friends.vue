@@ -2,9 +2,9 @@
   <div class="home-body">
     <div class="home-page">
       <div class="home-header">
-        <h1>好友</h1>
-        <div class="header-actions">
-          <router-link to="/home" class="secondary-button">返回主页</router-link>
+        <div>
+          <p class="eyebrow">FRIENDS CENTER</p>
+          <h1>好友</h1>
         </div>
       </div>
 
@@ -17,7 +17,7 @@
             {{ sending ? '发送中...' : '发送请求' }}
           </button>
         </div>
-        <div v-if="msg.text" :class="['message', msg.type]" style="margin-top:12px;">{{ msg.text }}</div>
+        <div v-if="msg.text" :class="['message', msg.type]" style="margin-top:14px;">{{ msg.text }}</div>
       </div>
 
       <!-- 收到的好友请求 -->
@@ -27,8 +27,13 @@
         <div class="request-list">
           <div v-for="req in pendingRequests" :key="req.friendshipId" class="request-item">
             <div class="request-info">
-              <span class="request-name">{{ req.requesterName }}</span>
-              <span class="request-id">ID: {{ req.requesterId }}</span>
+              <div class="friend-avatar" style="width:40px; height:40px; font-size:16px;">
+                {{ req.requesterName?.charAt(0) || '?' }}
+              </div>
+              <div>
+                <div class="request-name">{{ req.requesterName }}</div>
+                <div class="request-id">ID: {{ req.requesterId }}</div>
+              </div>
             </div>
             <div class="request-actions">
               <button class="accept-btn" @click="handleAccept(req.friendshipId)">接受</button>
@@ -42,14 +47,19 @@
       <div class="panel-section">
         <h3 class="section-title">我的好友</h3>
         <div v-if="friends.length === 0" class="empty-hint">还没有好友，快去添加吧</div>
-        <div class="friend-grid">
-          <div v-for="f in friends" :key="f.friendshipId" class="friend-card">
-            <div class="friend-avatar">{{ f.username?.charAt(0) || '?' }}</div>
-            <div class="friend-info">
-              <span class="friend-name">{{ f.username }}</span>
-              <span class="friend-rank">{{ rankName(f.rankScore) }} · 积分 {{ f.rankScore }}</span>
-              <span class="friend-id">ID: {{ f.playerId }}</span>
+        <div v-else class="friend-list-scroll">
+          <div class="friend-grid">
+            <div v-for="f in displayedFriends" :key="f.friendshipId" class="friend-card">
+              <div class="friend-avatar">{{ f.username?.charAt(0) || '?' }}</div>
+              <div class="friend-info">
+                <span class="friend-name">{{ f.username }}</span>
+                <span class="friend-rank">{{ rankName(f.rankScore) }} · 积分 {{ f.rankScore }}</span>
+                <span class="friend-id">ID: {{ f.playerId }}</span>
+              </div>
             </div>
+          </div>
+          <div v-if="friends.length > 50" class="empty-hint" style="text-align:center; margin-top:12px;">
+            共 {{ friends.length }} 位好友，显示前 50 位
           </div>
         </div>
       </div>
@@ -58,7 +68,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import { useWebSocket } from '../composables/useWebSocket'
 import { sendFriendRequest, acceptRequest, rejectRequest, getFriends, getPendingRequests } from '../api/friendship'
@@ -69,6 +79,8 @@ const sending = ref(false)
 const msg = ref({ text: '', type: '' })
 const friends = ref([])
 const pendingRequests = ref([])
+
+const displayedFriends = computed(() => friends.value.slice(0, 50))
 
 function rankName(score) {
   if (score >= 5000) return '大师'
@@ -93,7 +105,7 @@ async function loadData() {
 const { connect, disconnect } = useWebSocket(`/ws/friend/${store.playerId}`, {
   onMessage(data) {
     if (data.type === 'FRIEND_REQUEST' || data.type === 'FRIEND_ACCEPTED') {
-      loadData() // 收到通知时刷新列表
+      loadData()
     }
   }
 })

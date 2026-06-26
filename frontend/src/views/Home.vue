@@ -2,14 +2,12 @@
   <div class="home-body">
     <div class="home-page">
       <div class="home-header">
-        <h1>玩家主页</h1>
+        <div>
+          <p class="eyebrow">PLAYER DASHBOARD</p>
+          <h1>玩家主页</h1>
+        </div>
         <div class="header-actions">
-          <div class="nav-buttons">
-            <router-link to="/friends" class="btn-outline secondary-button">好友</router-link>
-            <router-link to="/match" class="btn-outline secondary-button">匹配</router-link>
-            <router-link to="/chat" class="btn-outline secondary-button">聊天</router-link>
-          </div>
-          <button class="logout-btn secondary-button" @click="handleLogout">退出登录</button>
+          <span style="color:var(--muted); font-size:14px;">欢迎回来，{{ player.username }}</span>
         </div>
       </div>
 
@@ -30,29 +28,33 @@
         </div>
 
         <div class="profile-card">
-          <p class="card-label">段位</p>
+          <p class="card-label">当前段位</p>
           <strong>{{ rankName }}</strong>
           <span>积分 {{ player.rankScore }}</span>
         </div>
 
         <div class="profile-card">
-          <p class="card-label">余额</p>
+          <p class="card-label">账户余额</p>
           <strong>¥{{ player.balance }}</strong>
-          <span>账户余额</span>
+          <span>可用于购买道具</span>
         </div>
 
         <div class="profile-card">
-          <p class="card-label">状态</p>
-          <strong>{{ player.status === 'NORMAL' ? '正常' : '已停用' }}</strong>
-          <span>账号状态</span>
+          <p class="card-label">账号状态</p>
+          <strong :style="{ color: player.status === 'NORMAL' ? 'var(--success)' : 'var(--error)' }">
+            {{ player.status === 'NORMAL' ? '正常' : '已停用' }}
+          </strong>
+          <span>系统状态</span>
         </div>
       </div>
 
-      <!-- 功能入口 -->
-      <div style="margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap;">
-        <button class="action-button" style="width:auto; margin-top:0;" @click="showProfileModal = true">编辑资料</button>
-        <button class="action-button" style="width:auto; margin-top:0;" @click="showPasswordModal = true">修改密码</button>
-        <button class="action-button" style="width:auto; margin-top:0;" @click="showRoleModal = true">选择角色</button>
+      <div class="quick-actions">
+        <button class="action-button" @click="showProfileModal = true">编辑资料</button>
+        <button class="action-button" @click="showPasswordModal = true">修改密码</button>
+        <button class="action-button" @click="showRoleModal = true">选择角色</button>
+        <router-link to="/match" class="action-button" style="text-decoration:none; display:inline-flex; align-items:center; justify-content:center;">
+          开始匹配
+        </router-link>
       </div>
 
       <!-- 编辑资料弹窗 -->
@@ -67,9 +69,9 @@
           <input v-model="profileForm.phone" />
           <label>身份证号</label>
           <input v-model="profileForm.idCard" />
-          <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:12px;">{{ modalMsg.text }}</div>
+          <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:14px;">{{ modalMsg.text }}</div>
           <div class="modal-actions">
-            <button class="secondary-button" @click="showProfileModal = false" style="background:transparent; color:var(--accent-dark);">取消</button>
+            <button class="secondary-button" @click="showProfileModal = false">取消</button>
             <button class="action-button" @click="handleUpdateProfile">保存</button>
           </div>
         </div>
@@ -83,9 +85,9 @@
           <input v-model="passwordForm.oldPassword" type="password" />
           <label>新密码</label>
           <input v-model="passwordForm.newPassword" type="password" />
-          <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:12px;">{{ modalMsg.text }}</div>
+          <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:14px;">{{ modalMsg.text }}</div>
           <div class="modal-actions">
-            <button class="secondary-button" @click="showPasswordModal = false" style="background:transparent; color:var(--accent-dark);">取消</button>
+            <button class="secondary-button" @click="showPasswordModal = false">取消</button>
             <button class="action-button" @click="handleChangePassword">确认</button>
           </div>
         </div>
@@ -95,22 +97,18 @@
       <div v-if="showRoleModal" class="modal-overlay" @click.self="showRoleModal = false">
         <div class="modal-content">
           <h2>选择角色</h2>
-          <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin: 16px 0;">
+          <div class="role-grid">
             <div v-for="r in roles" :key="r.id"
-              :style="{
-                padding:'16px', border: selectedRole === r.id ? '2px solid var(--accent)' : '1px solid var(--line)',
-                borderRadius:'8px', textAlign:'center', cursor:'pointer',
-                background: selectedRole === r.id ? 'rgba(15,139,141,0.08)' : '#fff'
-              }"
+              :class="['role-option', { selected: selectedRole === r.id }]"
               @click="selectedRole = r.id"
             >
-              <div style="font-size:28px;">{{ r.icon }}</div>
-              <div style="font-weight:700; margin-top:8px;">{{ r.name }}</div>
+              <div class="role-icon">{{ r.icon }}</div>
+              <div class="role-name">{{ r.name }}</div>
             </div>
           </div>
-          <div v-if="modalMsg.text" :class="['message', modalMsg.type]">{{ modalMsg.text }}</div>
+          <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:14px;">{{ modalMsg.text }}</div>
           <div class="modal-actions">
-            <button class="secondary-button" @click="showRoleModal = false" style="background:transparent; color:var(--accent-dark);">取消</button>
+            <button class="secondary-button" @click="showRoleModal = false">取消</button>
             <button class="action-button" @click="handleSelectRole">确认选择</button>
           </div>
         </div>
@@ -137,11 +135,11 @@ const rankNames = {
 const rankName = rankNames[player.value.rank] || player.value.rank || '青铜'
 
 const roles = [
-  { id: 1, name: '战士', icon: '⚔️' },
-  { id: 2, name: '法师', icon: '🔮' },
-  { id: 3, name: '刺客', icon: '🗡️' },
-  { id: 4, name: '射手', icon: '🏹' },
-  { id: 5, name: '辅助', icon: '🛡️' }
+  { id: 1, name: '战士', icon: '战' },
+  { id: 2, name: '法师', icon: '法' },
+  { id: 3, name: '刺客', icon: '刺' },
+  { id: 4, name: '射手', icon: '射' },
+  { id: 5, name: '辅助', icon: '辅' }
 ]
 
 const showProfileModal = ref(false)

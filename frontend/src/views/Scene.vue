@@ -2,9 +2,11 @@
   <div class="scene-body">
     <div class="scene-page">
       <div class="scene-header">
-        <h1>竞技场</h1>
-        <button class="secondary-button" style="color:#fff; border-color:rgba(255,255,255,0.3);"
-          @click="handleExit">
+        <div>
+          <p class="eyebrow">ARENA</p>
+          <h1>竞技场</h1>
+        </div>
+        <button class="secondary-button" @click="handleExit">
           退出场景
         </button>
       </div>
@@ -36,7 +38,7 @@
         <h2>{{ overlay.title }}</h2>
         <p>{{ overlay.message }}</p>
         <router-link to="/home" class="match-button btn-lg"
-          style="display:inline-block; text-decoration:none; line-height:50px;">
+          style="display:inline-block; text-decoration:none; line-height:54px;">
           返回主页
         </router-link>
       </div>
@@ -62,7 +64,7 @@ const overlay = reactive({ show: false, title: '', message: '' })
 
 let sceneWidth = 800
 let sceneHeight = 600
-const roleColors = { 1: '#e74c3c', 2: '#3498db', 3: '#2ecc71', 4: '#e67e22', 5: '#9b59b6' }
+const roleColors = { 1: '#ff3b3b', 2: '#00f0ff', 3: '#39ff14', 4: '#ffaa00', 5: '#a855f7' }
 
 if (!sceneId) {
   alert('缺少场景ID')
@@ -108,11 +110,11 @@ function drawScene() {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
 
-  ctx.fillStyle = '#1a1a2e'
+  ctx.fillStyle = '#13131f'
   ctx.fillRect(0, 0, sceneWidth, sceneHeight)
 
   // 网格
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)'
+  ctx.strokeStyle = 'rgba(0, 240, 255, 0.08)'
   ctx.lineWidth = 1
   for (let x = 0; x < sceneWidth; x += 40) {
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, sceneHeight); ctx.stroke()
@@ -124,16 +126,22 @@ function drawScene() {
   // 玩家
   for (const p of playerPositions.value) {
     const isMe = p.playerId === playerId
-    const color = roleColors[p.roleId] || '#0f8b8d'
+    const color = roleColors[p.roleId] || '#00f0ff'
     const x = p.x
     const y = p.y
 
     // 发光效果
     if (isMe) {
       ctx.beginPath()
-      ctx.arc(x, y, 24, 0, Math.PI * 2)
+      ctx.arc(x, y, 26, 0, Math.PI * 2)
       ctx.fillStyle = color + '33'
       ctx.fill()
+
+      ctx.beginPath()
+      ctx.arc(x, y, 34, 0, Math.PI * 2)
+      ctx.strokeStyle = color + '22'
+      ctx.lineWidth = 2
+      ctx.stroke()
     }
 
     // 玩家圆
@@ -141,7 +149,7 @@ function drawScene() {
     ctx.arc(x, y, 16, 0, Math.PI * 2)
     ctx.fillStyle = color
     ctx.fill()
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)'
     ctx.lineWidth = 2
     ctx.stroke()
 
@@ -151,7 +159,7 @@ function drawScene() {
     if (d) {
       ctx.beginPath()
       ctx.moveTo(x + d[0] * 20, y + d[1] * 20)
-      ctx.lineTo(x + d[0] * 28, y + d[1] * 28)
+      ctx.lineTo(x + d[0] * 30, y + d[1] * 30)
       ctx.strokeStyle = '#fff'
       ctx.lineWidth = 3
       ctx.stroke()
@@ -159,9 +167,9 @@ function drawScene() {
 
     // 名字
     ctx.fillStyle = '#fff'
-    ctx.font = '12px "Microsoft YaHei", sans-serif'
+    ctx.font = 'bold 12px "Noto Sans SC", sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText(p.playerName + (isMe ? ' (你)' : ''), x, y - 24)
+    ctx.fillText(p.playerName + (isMe ? ' (你)' : ''), x, y - 26)
   }
 }
 
@@ -170,7 +178,6 @@ function handleExit() {
   setTimeout(() => router.push('/home'), 500)
 }
 
-// 键盘事件
 function onKeyDown(e) {
   const dirMap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT' }
   const dir = dirMap[e.key]
@@ -183,8 +190,6 @@ function onKeyDown(e) {
 function onKeyUp(e) {
   const dirMap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT' }
   if (dirMap[e.key]) {
-    // 检查是否还有其他方向键按下
-    // 简单处理：松开就停止
     send({ type: 'STOP' })
   }
 }

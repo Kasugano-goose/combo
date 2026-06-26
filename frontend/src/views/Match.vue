@@ -2,9 +2,17 @@
   <div class="home-body">
     <div class="home-page">
       <div class="home-header">
-        <h1>匹配</h1>
+        <div>
+          <p class="eyebrow">MATCHMAKING</p>
+          <h1>竞技匹配</h1>
+        </div>
         <div class="header-actions">
-          <router-link to="/home" class="secondary-button">返回主页</router-link>
+          <span class="ws-status" v-if="connected">
+            <span class="ws-dot connected"></span> 匹配服务已连接
+          </span>
+          <span class="ws-status" v-else>
+            <span class="ws-dot disconnected"></span> 连接中...
+          </span>
         </div>
       </div>
 
@@ -19,8 +27,8 @@
         <div class="profile-card match-control">
           <!-- 空闲状态 -->
           <div v-if="state === 'idle'" class="match-panel">
-            <div class="match-icon">🎮</div>
-            <p class="match-hint">准备好了吗？</p>
+            <div class="match-icon">VS</div>
+            <p class="match-hint">准备好了吗？寻找你的对手</p>
             <button class="match-button" @click="handleJoin" :disabled="!connected">
               开始匹配
             </button>
@@ -31,7 +39,7 @@
 
           <!-- 等待中 -->
           <div v-if="state === 'waiting'" class="match-panel">
-            <div class="match-icon spinning">⚔️</div>
+            <div class="match-icon spinning">◌</div>
             <p class="match-hint">正在寻找对手...</p>
             <div class="match-stats">
               <div class="match-stat-item">
@@ -47,15 +55,14 @@
                 <strong>{{ remaining }}s</strong>
               </div>
             </div>
-            <button class="match-button match-cancel secondary-button" @click="handleLeave"
-              style="color:var(--error); border-color:var(--error);">
+            <button class="match-button match-cancel secondary-button" @click="handleLeave">
               取消匹配
             </button>
           </div>
 
           <!-- 匹配成功 -->
           <div v-if="state === 'found'" class="match-panel">
-            <div class="match-icon">🎉</div>
+            <div class="match-icon">OK</div>
             <p class="match-hint">匹配成功！</p>
             <div class="match-result-info">
               <p><strong>对手：</strong>{{ opponent.name }}（ID: {{ opponent.id }}）</p>
@@ -90,7 +97,7 @@ const rankNames = {
 }
 const rankName = rankNames[player.value.rank] || '青铜'
 
-const state = ref('idle') // idle | waiting | found
+const state = ref('idle')
 const poolSize = ref(0)
 const elapsed = ref(0)
 const remaining = ref(60)
@@ -101,7 +108,6 @@ const opponent = ref({ id: 0, name: '', score: 0 })
 let pollTimer = null
 let joinTime = 0
 
-// 通用状态切换：清理所有定时器
 function resetToIdle() {
   state.value = 'idle'
   confirmed.value = false
@@ -109,24 +115,17 @@ function resetToIdle() {
   stopPolling()
 }
 
-// 切换到匹配成功状态（统一入口，避免遗漏清理）
 function switchToFound(opponentInfo, yourConfirmed = false, opponentConfirmed = false) {
-  if (state.value === 'found') {
-    console.log('[Match] 已在 found 状态，忽略重复切换')
-    return
-  }
+  if (state.value === 'found') return
   state.value = 'found'
   opponent.value = opponentInfo
   confirmed.value = yourConfirmed
   confirmText.value = opponentConfirmed ? '对方已确认，等待你的确认...' : '等待双方确认...'
   stopPolling()
-  console.log('[Match] 切换到 found 状态，对手:', opponentInfo)
 }
 
-// WebSocket 接收匹配通知
 const { connected, connect, disconnect } = useWebSocket(`/ws/friend/${store.playerId}`, {
   onMessage(data) {
-    console.log('[Match] 收到 WebSocket 消息:', data.type, data)
     if (data.type === 'MATCHED') {
       switchToFound(
         { id: data.opponentId, name: data.opponentName, score: data.opponentScore },
@@ -140,40 +139,31 @@ const { connected, connect, disconnect } = useWebSocket(`/ws/friend/${store.play
       stopPolling()
       router.push(`/scene?sceneId=${data.sceneId}`)
     } else if (data.type === 'MATCH_TIMEOUT') {
-      console.log('[Match] 收到匹配超时通知')
       resetToIdle()
     } else if (data.type === 'CONFIRM_TIMEOUT') {
-      console.log('[Match] 收到确认超时通知')
       resetToIdle()
       alert(data.message || '确认超时，匹配已取消，请重新匹配')
     }
   },
-  // 重连后主动查询匹配状态（补偿断线期间可能丢失的通知）
   onOpen() {
-    console.log('[Match] WebSocket 已连接，当前状态:', state.value)
     if (state.value === 'waiting' || state.value === 'found') {
       checkMatchStatusFallback()
     }
   }
 })
 
-// 重连后主动查询匹配状态（兜底）
 async function checkMatchStatusFallback() {
   try {
     const status = await getMatchStatus(store.playerId)
-    console.log('[Match] 重连后查询状态:', status)
     applyMatchStatus(status)
   } catch (e) {
     console.error('[Match] 重连后查询状态失败:', e)
   }
 }
 
-// 根据 /match/status 响应更新状态（统一逻辑，轮询和重连共用）
 function applyMatchStatus(status) {
-  // 发现有待确认的匹配对
   if (status.hasPendingMatch) {
     if (state.value !== 'found') {
-      console.warn('[Match] 通过轮询/重连发现匹配结果', status)
       switchToFound(
         { id: status.opponentId, name: status.opponentName, score: status.opponentScore },
         status.yourConfirmed || false,
@@ -183,16 +173,13 @@ function applyMatchStatus(status) {
     return
   }
 
-  // 不在池中也没有匹配对 → 超时或被取消
   if (!status.inPool && !status.hasPendingMatch) {
     if (state.value === 'waiting') {
-      console.warn('[Match] 匹配已超时或被取消')
       resetToIdle()
     }
     return
   }
 
-  // 在池中，更新等待信息
   if (status.inPool) {
     poolSize.value = status.poolSize
   }
@@ -201,14 +188,12 @@ function applyMatchStatus(status) {
 function startPolling() {
   joinTime = Date.now()
   pollTimer = setInterval(async () => {
-    // 如果已经不在 waiting 状态，停止轮询
     if (state.value !== 'waiting') {
       stopPolling()
       return
     }
     try {
       const status = await getMatchStatus(store.playerId)
-      console.log('[轮询] /match/status 返回:', JSON.stringify(status))
       elapsed.value = Math.floor((Date.now() - joinTime) / 1000)
       remaining.value = Math.max(0, Math.floor((status.timeout - (Date.now() - joinTime)) / 1000))
       applyMatchStatus(status)
@@ -228,12 +213,10 @@ function stopPolling() {
 async function handleJoin() {
   try {
     const status = await joinMatch()
-    console.log('[Match] 加入匹配池成功:', JSON.stringify(status))
     poolSize.value = status.poolSize
     state.value = 'waiting'
     startPolling()
   } catch (e) {
-    console.error('[Match] 加入匹配池失败:', e.message)
     alert(e.message)
   }
 }

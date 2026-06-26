@@ -2,9 +2,9 @@
   <div class="home-body">
     <div class="home-page">
       <div class="home-header">
-        <h1>聊天</h1>
-        <div class="header-actions">
-          <router-link to="/home" class="secondary-button">返回主页</router-link>
+        <div>
+          <p class="eyebrow">MESSAGES</p>
+          <h1>聊天</h1>
         </div>
       </div>
 
@@ -22,7 +22,7 @@
             {{ connected ? '已连接' : '未连接' }}
           </div>
 
-          <div v-if="chatTarget" class="chat-target-info" style="margin-top:12px;">
+          <div v-if="chatTarget" class="chat-target-info" style="margin-top:14px;">
             正在和 <strong>{{ chatTarget }}</strong> 聊天
           </div>
         </div>

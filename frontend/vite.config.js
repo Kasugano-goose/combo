@@ -6,19 +6,19 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/players': {
+      '/players/': {
         target: 'http://localhost:8090',
         changeOrigin: true
       },
-      '/friends': {
+      '/friends/': {
         target: 'http://localhost:8090',
         changeOrigin: true
       },
-      '/match': {
+      '/match/': {
         target: 'http://localhost:8090',
         changeOrigin: true
       },
-      '/scene': {
+      '/scene/': {
         target: 'http://localhost:8090',
         changeOrigin: true
       },
