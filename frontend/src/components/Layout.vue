@@ -54,20 +54,20 @@ async function handleLogout() {
 <style scoped>
 .sidebar-link {
     position: relative;
-    padding-left: 20px;
+    padding-left: 18px;
 }
 .sidebar-link-indicator {
     position: absolute;
-    left: 6px;
+    left: 5px;
     top: 50%;
     transform: translateY(-50%);
-    width: 3px;
+    width: 2px;
     height: 0;
-    background: var(--accent);
-    border-radius: 2px;
-    transition: height 0.2s ease;
+    background: var(--text);
+    border-radius: 1px;
+    transition: height 0.15s ease;
 }
 .sidebar-link.router-link-active .sidebar-link-indicator {
-    height: 18px;
+    height: 16px;
 }
 </style>
