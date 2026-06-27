@@ -8,9 +8,9 @@ import com.example.combo.player.repository.PlayerRepository;
 import com.example.combo.player.service.PlayerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -30,13 +30,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class MatchService {
     private final PlayerRepository playerRepository;
     private final PlayerService playerService;
@@ -44,6 +43,7 @@ public class MatchService {
     private final WebSocketSessionManager webSocketSessionManager;
     private final ObjectMapper objectMapper;
     private final SceneService sceneService;
+    private final Executor notifyExecutor;
 
     // Redis Key 定义
     // 注意：Redis 集群部署时需使用 Hash Tag 确保相关 Key 在同一 slot
@@ -67,14 +67,28 @@ public class MatchService {
     private static final long CONFIRM_BOTH_DONE = 1;        // 双方确认完成
     private static final long CONFIRM_ONE_DONE = 2;         // 仅当前玩家确认，等待对方
 
+    public MatchService(PlayerRepository playerRepository,
+                        PlayerService playerService,
+                        StringRedisTemplate redisTemplate,
+                        WebSocketSessionManager webSocketSessionManager,
+                        ObjectMapper objectMapper,
+                        SceneService sceneService,
+                        @Qualifier("notifyExecutor") Executor notifyExecutor) {
+        this.playerRepository = playerRepository;
+        this.playerService = playerService;
+        this.redisTemplate = redisTemplate;
+        this.webSocketSessionManager = webSocketSessionManager;
+        this.objectMapper = objectMapper;
+        this.sceneService = sceneService;
+        this.notifyExecutor = notifyExecutor;
+    }
+
     // 匹配遍历优化：优先匹配分数相近的玩家（±200 分），匹配不到再全量遍历
     private static final double MATCH_SCORE_RANGE = 200.0;
 
     // 通知持久化：未送达通知暂存 Redis，玩家重连后拉取
     private static final String PENDING_NOTIFICATION_PREFIX = "match:pending:notify:";
     private static final long PENDING_NOTIFICATION_TTL_SECONDS = 300L; // 5 分钟过期
-
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
 
     private RedisScript<Long> confirmScript;
     private RedisScript<Long> matchAndRemoveScript;
@@ -223,16 +237,32 @@ public class MatchService {
 
     /**
      * 从候选集合中尝试匹配
+     *
+     * <p>优化：预先批量查询所有候选玩家，避免循环内 N+1 DB 查询。
+     * 候选集合通常较小（±200 分范围），批量查询开销可接受。
+     *
      * @return true 表示匹配成功
      */
     private boolean tryMatchFromCandidates(Player player, Set<String> candidates) {
         if (candidates == null || candidates.isEmpty()) return false;
 
+        // 批量查询所有候选玩家，避免循环内 N+1 查询
+        List<Long> candidateIds = candidates.stream()
+                .map(Long::parseLong)
+                .filter(id -> !id.equals(player.getId()))
+                .collect(Collectors.toList());
+
+        if (candidateIds.isEmpty()) return false;
+
+        Map<Long, Player> opponentMap = playerRepository.findAllById(candidateIds)
+                .stream()
+                .collect(Collectors.toMap(Player::getId, p -> p));
+
         for (String memberId : candidates) {
             Long opponentId = Long.parseLong(memberId);
             if (opponentId.equals(player.getId())) continue;
 
-            Player opponent = playerRepository.findById(opponentId).orElse(null);
+            Player opponent = opponentMap.get(opponentId);
             if (opponent == null || opponent.getStatus() != Player.PlayerStatus.NORMAL) {
                 removePlayerFromPool(opponentId);
                 continue;
@@ -255,14 +285,11 @@ public class MatchService {
 
                 if (result == null || result == 0) {
                     // 对手已被其他人匹配或已调用 leaveMatch 退出池，继续尝试下一个
-                    // matchAndRemoveScript 原子性保证：若对手同时调用 leaveMatch，
-                    // 脚本会返回 0（对手已不在池中），不会产生脏数据
                     log.debug("玩家 {} 已不在匹配池中，跳过", opponentId);
                     continue;
                 }
 
                 // 防御性校验：Lua 脚本已原子移除双方，验证双方确实不在池中
-                // （防止并发 leaveMatch 导致不一致状态）
                 if (redisTemplate.opsForZSet().score(MATCH_POOL_KEY, player.getId().toString()) != null
                         || redisTemplate.opsForZSet().score(MATCH_POOL_KEY, opponentId.toString()) != null) {
                     log.warn("匹配后检测到异常：玩家仍在匹配池中，重新清理并跳过: player={}, opponent={}",
@@ -511,13 +538,17 @@ public class MatchService {
     }
 
     /**
-     * 异步发送通知，带渐进式重试和 Redis 持久化兜底
+     * 异步发送通知，带渐进式重试和 Redis 持久化兜底。
      *
-     * 重试策略：总窗口 ~65 秒，渐进式间隔（1s, 2s, 3s, 5s, 5s, 7s, 7s, 10s, 10s, 15s）
-     * 全部失败后存入 Redis List，玩家重连时自动拉取
+     * <p><b>端点说明</b>：Match 通知推送到 {@code /ws/friend/{playerId}} 端点（endpointType="friend"）。
+     * Match 与 Friend 共用同一 WebSocket 连接，客户端通过消息中的 {@code type} 字段区分业务类型。
+     * 若未来拆分为独立 WS 连接，需同步修改此处的端点名称。
+     *
+     * <p><b>重试策略</b>：总窗口 ~65 秒，渐进式间隔（1s, 2s, 3s, 5s, 5s, 7s, 7s, 10s, 10s, 15s）。
+     * 全部失败后存入 Redis List，玩家重连时通过 {@link #pullPendingNotifications} 自动拉取。
      */
     private void sendWithRetry(Long playerId, Map<String, Object> notification) {
-        scheduler.execute(() -> {
+        notifyExecutor.execute(() -> {
             try {
                 String json = objectMapper.writeValueAsString(notification);
                 String type = (String) notification.get("type");
@@ -729,10 +760,5 @@ public class MatchService {
         }
         status.put("poolSize", getWaitingCount());
         return status;
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        scheduler.shutdown();
     }
 }
