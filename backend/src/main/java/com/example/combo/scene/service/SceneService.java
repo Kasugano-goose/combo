@@ -7,11 +7,13 @@ import com.example.combo.scene.domain.Scene;
 import com.example.combo.scene.domain.Scene.SceneStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
+import jakarta.websocket.CloseReason;
 import jakarta.websocket.Session;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
@@ -20,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Service
@@ -32,8 +35,8 @@ public class SceneService {
     private final ConcurrentHashMap<Long, Scene> scenes = new ConcurrentHashMap<>();
     // 反向索引：playerId → sceneId（快速查找玩家所在场景）
     private final ConcurrentHashMap<Long, Long> playerSceneMap = new ConcurrentHashMap<>();
-    // 场景ID自增
-    private long sceneIdCounter = 0;
+    // 场景ID自增（线程安全）
+    private final AtomicLong sceneIdCounter = new AtomicLong(0);
 
     // 游戏循环线程池
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
@@ -46,8 +49,11 @@ public class SceneService {
 
     /**
      * 创建场景（匹配成功后调用）
+     *
+     * 使用 synchronized 防止并发 createScene 对同一玩家产生竞态：
+     * check-then-put 在同一把锁内完成，避免两个线程同时通过 containsKey 检查。
      */
-    public Scene createScene(Player player1, Player player2) {
+    public synchronized Scene createScene(Player player1, Player player2) {
         // 检查玩家是否已在其他场景中
         if (playerSceneMap.containsKey(player1.getId())) {
             throw new IllegalArgumentException("玩家 " + player1.getId() + " 已在其他场景中");
@@ -56,7 +62,7 @@ public class SceneService {
             throw new IllegalArgumentException("玩家 " + player2.getId() + " 已在其他场景中");
         }
 
-        Long sceneId = ++sceneIdCounter;
+        Long sceneId = sceneIdCounter.incrementAndGet();
 
         // 创建双方初始位置（左右两侧）
         PlayerPosition pos1 = PlayerPosition.builder()
@@ -87,7 +93,7 @@ public class SceneService {
         scene.setSpeed(DEFAULT_SPEED);
         scene.setStatus(SceneStatus.ACTIVE);
 
-        // 存储场景
+        // 存储场景（在锁内完成，保证与 containsKey 检查的原子性）
         scenes.put(sceneId, scene);
         playerSceneMap.put(player1.getId(), sceneId);
         playerSceneMap.put(player2.getId(), sceneId);
@@ -157,21 +163,8 @@ public class SceneService {
         if (sceneId == null) {
             return;
         }
-        Scene scene = scenes.get(sceneId);
-        if (scene == null) {
-            return;
-        }
-
-        Long opponentId = scene.getOpponentId(playerId);
         log.info("玩家 {} 主动退出场景 {}", playerId, sceneId);
-
-        // 先通知对手（场景销毁前 session 还可用）
-        if (opponentId != null) {
-            notifySceneEnd(scene, opponentId, "对方已退出场景");
-        }
-
-        // 销毁场景
-        destroyScene(sceneId, "玩家 " + playerId + " 已退出场景");
+        destroyScene(sceneId, playerId, "对方已退出场景");
     }
 
     /**
@@ -182,21 +175,8 @@ public class SceneService {
         if (sceneId == null) {
             return;
         }
-        Scene scene = scenes.get(sceneId);
-        if (scene == null) {
-            return;
-        }
-
-        Long opponentId = scene.getOpponentId(playerId);
         log.info("玩家 {} 断开连接，场景 {} 销毁", playerId, sceneId);
-
-        // 先通知对手
-        if (opponentId != null) {
-            notifySceneEnd(scene, opponentId, "对方已断开连接，场景结束");
-        }
-
-        // 销毁场景
-        destroyScene(sceneId, "玩家 " + playerId + " 断开连接");
+        destroyScene(sceneId, playerId, "对方已断开连接，场景结束");
     }
 
     /**
@@ -288,6 +268,21 @@ public class SceneService {
      * 通知双方场景开始
      */
     private void notifySceneStart(Scene scene) {
+        // SCENE_START 通过 sendToSceneSession 发送，但此时客户端尚未连接 Scene WS
+        // 所以这里只准备数据，实际发送在 SceneWebSocketEndpoint.onOpen 中完成
+        // 此方法保留用于日志等用途
+        log.info("场景 {} 就绪，等待双方 WebSocket 连接", scene.getSceneId());
+    }
+
+    /**
+     * 当玩家 Scene WebSocket 连接成功后，发送 SCENE_START 给该玩家
+     */
+    public void sendSceneStartToPlayer(Long playerId) {
+        Long sceneId = playerSceneMap.get(playerId);
+        if (sceneId == null) return;
+        Scene scene = scenes.get(sceneId);
+        if (scene == null || scene.getStatus() != SceneStatus.ACTIVE) return;
+
         try {
             Map<String, Object> notification = new HashMap<>();
             notification.put("type", "SCENE_START");
@@ -299,10 +294,10 @@ public class SceneService {
             notification.put("timestamp", LocalDateTime.now().toString());
 
             String json = objectMapper.writeValueAsString(notification);
-            webSocketSessionManager.sendToUser(scene.getPlayer1().getPlayerId(), json);
-            webSocketSessionManager.sendToUser(scene.getPlayer2().getPlayerId(), json);
+            sendToSceneSession(scene, playerId, json);
+            log.info("已发送 SCENE_START 给玩家 {}", playerId);
         } catch (Exception e) {
-            log.error("发送场景开始通知失败", e);
+            log.error("发送 SCENE_START 失败: playerId={}", playerId, e);
         }
     }
 
@@ -330,12 +325,34 @@ public class SceneService {
         Session session = scene.getPlayerSession(playerId);
         if (session != null && session.isOpen()) {
             try {
-                session.getBasicRemote().sendText(message);
+                // 游戏循环(broadcastState)与 onOpen/onClose 线程可能并发写同一 session，
+                // 同一 session 并发 sendText 会抛 IllegalStateException，按 session 实例串行化。
+                synchronized (session) {
+                    session.getBasicRemote().sendText(message);
+                }
             } catch (Exception e) {
                 log.error("Scene WS 发送失败: playerId={}", playerId, e);
             }
         } else {
-            log.warn("玩家 {} 的 Scene WS Session 不可用", playerId);
+            log.debug("玩家 {} 的 Scene WS Session 不可用（客户端可能尚未连接）", playerId);
+        }
+    }
+
+    /**
+     * 关闭场景内双方的 WS Session（场景销毁后释放连接）
+     */
+    private void closeSceneSessions(Scene scene) {
+        closeSession(scene.getPlayer1Session());
+        closeSession(scene.getPlayer2Session());
+    }
+
+    private void closeSession(Session session) {
+        if (session != null && session.isOpen()) {
+            try {
+                session.close(new CloseReason(CloseReason.CloseCodes.NORMAL_CLOSURE, "场景已结束"));
+            } catch (IOException e) {
+                log.debug("关闭 Scene WS Session 失败", e);
+            }
         }
     }
 
@@ -349,12 +366,25 @@ public class SceneService {
     }
 
     /**
-     * 销毁场景
+     * 销毁场景（幂等：并发调用只有第一个会执行清理和通知）
+     *
+     * @param sceneId   场景 ID
+     * @param triggerId 触发销毁的玩家 ID（用于确定通知谁的对手）
+     * @param reason    通知对手的原因
      */
-    private void destroyScene(Long sceneId, String reason) {
+    private void destroyScene(Long sceneId, Long triggerId, String reason) {
+        // 原子移除：并发调用时只有一个线程能拿到非 null 的 scene
         Scene scene = scenes.remove(sceneId);
         if (scene == null) {
+            // 已被其他线程销毁，幂等返回
             return;
+        }
+
+        // 只有成功移除 scene 的线程才执行后续清理和通知
+        // 先通知对手（此时 scene 的 session 还可用）
+        Long opponentId = scene.getOpponentId(triggerId);
+        if (opponentId != null) {
+            notifySceneEnd(scene, opponentId, reason);
         }
 
         // 停止游戏循环
@@ -367,6 +397,29 @@ public class SceneService {
         playerSceneMap.remove(scene.getPlayer2().getPlayerId());
 
         scene.setStatus(SceneStatus.CLOSED);
+        // 关闭双方 WS 连接（索引已先行移除，触发的 onClose 会因找不到场景而幂等返回）
+        closeSceneSessions(scene);
+        log.info("场景 {} 已销毁: {}", sceneId, reason);
+    }
+
+    /**
+     * 销毁场景（关闭时调用，无需通知对手）
+     */
+    private void destroyScene(Long sceneId, String reason) {
+        Scene scene = scenes.remove(sceneId);
+        if (scene == null) {
+            return;
+        }
+
+        if (scene.getGameLoopTask() != null) {
+            scene.getGameLoopTask().cancel(false);
+        }
+
+        playerSceneMap.remove(scene.getPlayer1().getPlayerId());
+        playerSceneMap.remove(scene.getPlayer2().getPlayerId());
+
+        scene.setStatus(SceneStatus.CLOSED);
+        closeSceneSessions(scene);
         log.info("场景 {} 已销毁: {}", sceneId, reason);
     }
 

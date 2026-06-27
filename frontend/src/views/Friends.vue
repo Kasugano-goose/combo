@@ -68,7 +68,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import { useWebSocket } from '../composables/useWebSocket'
 import { sendFriendRequest, acceptRequest, rejectRequest, getFriends, getPendingRequests } from '../api/friendship'
@@ -94,10 +94,13 @@ function rankName(score) {
 async function loadData() {
   try {
     const [f, p] = await Promise.all([getFriends(), getPendingRequests()])
-    friends.value = f
-    pendingRequests.value = p
+    // 防御：后端应返回数组，如果不是（被错误处理成字符串/对象），强制成空数组
+    friends.value = Array.isArray(f) ? f : []
+    pendingRequests.value = Array.isArray(p) ? p : []
   } catch (e) {
     console.error('加载好友数据失败:', e)
+    friends.value = []
+    pendingRequests.value = []
   }
 }
 
@@ -113,10 +116,6 @@ const { connect, disconnect } = useWebSocket(`/ws/friend/${store.playerId}`, {
 onMounted(() => {
   loadData()
   connect()
-})
-
-onUnmounted(() => {
-  disconnect()
 })
 
 async function handleSendRequest() {

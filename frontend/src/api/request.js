@@ -19,6 +19,12 @@ request.interceptors.request.use(
 request.interceptors.response.use(
   (res) => {
     console.log(`[响应] ${res.config.url} ${res.status}`, res.data)
+    // 防御：如果响应不是 JSON（例如代理错误返回了 HTML），抛出明确错误，
+    // 避免下游把字符串当数组/对象用，导致 v-for 按字符渲染。
+    if (typeof res.data === 'string' && res.data.trimStart().startsWith('<')) {
+      console.error(`[响应错误] ${res.config.url}: 收到 HTML 而非 JSON，可能是代理配置错误`)
+      return Promise.reject(new Error('接口返回了非 JSON 响应，请检查代理配置'))
+    }
     return res.data
   },
   (err) => {
@@ -27,7 +33,7 @@ request.interceptors.response.use(
     console.error(`[响应错误] ${err.config?.url} ${status}: ${msg}`)
 
     // 未登录时跳转登录页
-    if (status === 400 && msg === '请先登录') {
+    if (status === 401) {
       router.push('/login')
     }
 

@@ -82,6 +82,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../stores/player'
 import { useWebSocket } from '../composables/useWebSocket'
@@ -89,13 +90,14 @@ import { joinMatch, leaveMatch, getMatchStatus, confirmMatch } from '../api/matc
 
 const router = useRouter()
 const store = usePlayerStore()
-const player = ref(store.player || {})
+const { player: storePlayer } = storeToRefs(store)
+const player = computed(() => storePlayer.value || {})
 
 const rankNames = {
   BRONZE: '青铜', SILVER: '白银', GOLD: '黄金',
   PLATINUM: '铂金', DIAMOND: '钻石', MASTER: '大师'
 }
-const rankName = rankNames[player.value.rank] || '青铜'
+const rankName = computed(() => rankNames[player.value.rank] || '青铜')
 
 const state = ref('idle')
 const poolSize = ref(0)
@@ -195,7 +197,8 @@ function startPolling() {
     try {
       const status = await getMatchStatus(store.playerId)
       elapsed.value = Math.floor((Date.now() - joinTime) / 1000)
-      remaining.value = Math.max(0, Math.floor((status.timeout - (Date.now() - joinTime)) / 1000))
+      const timeoutMs = Number(status.timeout) || 60000
+      remaining.value = Math.max(0, Math.floor((timeoutMs - (Date.now() - joinTime)) / 1000))
       applyMatchStatus(status)
     } catch (e) {
       console.error('[轮询] /match/status 请求失败:', e.message)

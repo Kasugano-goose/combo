@@ -11,6 +11,7 @@ import com.example.combo.player.repository.PlayerRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.mindrot.jbcrypt.BCrypt;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -81,12 +82,21 @@ public class PlayerService {
                 .updatedAt(now)
                 .build();
 
-        return playerRepository.save(player);
+        try {
+            return playerRepository.save(player);
+        } catch (DataIntegrityViolationException e) {
+            // 并发注册时 existsBy 检查通过但 save 冲突（唯一约束）
+            throw new BusinessException("注册信息与其他用户冲突（ID、用户名、手机号或身份证号重复）");
+        }
     }
 
     public Player login(LoginPlayerRequest request) {
         Player player = playerRepository.findById(request.getId())
                 .orElseThrow(() -> new BusinessException("账号ID或密码不正确"));
+
+        if (player.getStatus() == Player.PlayerStatus.DISABLED) {
+            throw new BusinessException("账号已停用");
+        }
 
         if (!BCrypt.checkpw(request.getPassword(), player.getPassword())) {
             // 兼容旧的明文密码：如果 BCrypt 校验失败但明文匹配，则自动加密迁移
@@ -151,6 +161,9 @@ public class PlayerService {
      */
     public Player selectRole(Long playerId, Long roleId) {
         Player player = findById(playerId);
+        if (roleId == null || roleId < 1 || roleId > 5) {
+            throw new BusinessException("角色ID无效，可选范围 1-5");
+        }
         player.setSelectedRoleId(roleId);
         player.setUpdatedAt(LocalDateTime.now());
         return playerRepository.save(player);

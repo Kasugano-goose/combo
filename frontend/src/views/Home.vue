@@ -8,6 +8,7 @@
         </div>
         <div class="header-actions">
           <span style="color:var(--muted); font-size:14px;">欢迎回来，{{ player.username }}</span>
+          <button class="secondary-button" @click="handleLogout" style="margin-left:12px;">退出登录</button>
         </div>
       </div>
 
@@ -23,7 +24,6 @@
           <dl>
             <div><dt>真实姓名</dt><dd>{{ player.realName }}</dd></div>
             <div><dt>手机号</dt><dd>{{ player.phone }}</dd></div>
-            <div><dt>身份证号</dt><dd>{{ player.idCard }}</dd></div>
           </dl>
         </div>
 
@@ -49,9 +49,9 @@
       </div>
 
       <div class="quick-actions">
-        <button class="action-button" @click="showProfileModal = true">编辑资料</button>
-        <button class="action-button" @click="showPasswordModal = true">修改密码</button>
-        <button class="action-button" @click="showRoleModal = true">选择角色</button>
+        <button class="action-button" @click="showProfileModal = true; modalMsg.text = ''">编辑资料</button>
+        <button class="action-button" @click="showPasswordModal = true; modalMsg.text = ''">修改密码</button>
+        <button class="action-button" @click="showRoleModal = true; modalMsg.text = ''">选择角色</button>
         <router-link to="/match" class="action-button" style="text-decoration:none; display:inline-flex; align-items:center; justify-content:center;">
           开始匹配
         </router-link>
@@ -67,8 +67,6 @@
           <input v-model="profileForm.realName" />
           <label>手机号</label>
           <input v-model="profileForm.phone" />
-          <label>身份证号</label>
-          <input v-model="profileForm.idCard" />
           <div v-if="modalMsg.text" :class="['message', modalMsg.type]" style="margin-top:14px;">{{ modalMsg.text }}</div>
           <div class="modal-actions">
             <button class="secondary-button" @click="showProfileModal = false">取消</button>
@@ -118,27 +116,30 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { usePlayerStore } from '../stores/player'
 import { updateProfile, changePassword, selectRole } from '../api/player'
 
 const router = useRouter()
 const store = usePlayerStore()
-const player = ref(store.player || {})
+// 用 storeToRefs 保持与 store 的响应式联动，避免 ref 快照导致更新不同步
+const { player: storePlayer } = storeToRefs(store)
+const player = computed(() => storePlayer.value || {})
 
 const rankNames = {
   BRONZE: '青铜', SILVER: '白银', GOLD: '黄金',
   PLATINUM: '铂金', DIAMOND: '钻石', MASTER: '大师'
 }
 
-const rankName = rankNames[player.value.rank] || player.value.rank || '青铜'
+const rankName = computed(() => rankNames[player.value.rank] || player.value.rank || '青铜')
 
 const roles = [
   { id: 1, name: '战士', icon: '战' },
   { id: 2, name: '法师', icon: '法' },
   { id: 3, name: '刺客', icon: '刺' },
-  { id: 4, name: '射手', icon: '射' },
+  { id: 4, name: '坦克', icon: '坦' },
   { id: 5, name: '辅助', icon: '辅' }
 ]
 
@@ -151,8 +152,7 @@ const modalMsg = reactive({ text: '', type: '' })
 const profileForm = reactive({
   username: player.value.username || '',
   realName: player.value.realName || '',
-  phone: player.value.phone || '',
-  idCard: player.value.idCard || ''
+  phone: player.value.phone || ''
 })
 
 const passwordForm = reactive({ oldPassword: '', newPassword: '' })
@@ -162,7 +162,11 @@ async function handleUpdateProfile() {
   try {
     const updated = await updateProfile(profileForm)
     store.updatePlayer(updated)
-    Object.assign(player.value, updated)
+    Object.assign(profileForm, {
+      username: updated.username || '',
+      realName: updated.realName || '',
+      phone: updated.phone || ''
+    })
     modalMsg.text = '资料更新成功'
     modalMsg.type = 'success'
     setTimeout(() => { showProfileModal.value = false; modalMsg.text = '' }, 1000)
@@ -192,7 +196,7 @@ async function handleSelectRole() {
   try {
     const updated = await selectRole(selectedRole.value)
     store.updatePlayer(updated)
-    Object.assign(player.value, updated)
+    selectedRole.value = updated.selectedRoleId || selectedRole.value
     modalMsg.text = '角色选择成功'
     modalMsg.type = 'success'
     setTimeout(() => { showRoleModal.value = false; modalMsg.text = '' }, 1000)

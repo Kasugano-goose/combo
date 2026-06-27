@@ -21,7 +21,7 @@ import java.util.concurrent.CompletableFuture;
  */
 @Slf4j
 @Component
-@ServerEndpoint("/ws/friend/{playerId}")
+@ServerEndpoint(value = "/ws/friend/{playerId}", configurator = HttpSessionHandshakeConfigurator.class)
 public class FriendWebSocketEndpoint {
 
     // 注意: @ServerEndpoint 中不能直接使用 @Autowired
@@ -46,11 +46,18 @@ public class FriendWebSocketEndpoint {
     public void onOpen(Session session, @PathParam("playerId") Long playerId) {
         // 验证 playerId 有效性
         if (playerId == null || playerId <= 0) {
-            try {
-                session.close(new CloseReason(CloseReason.CloseCodes.VIOLATED_POLICY, "无效的玩家ID"));
-            } catch (IOException e) {
-                log.error("关闭连接失败", e);
-            }
+            closeQuietly(session, CloseReason.CloseCodes.VIOLATED_POLICY, "无效的玩家ID");
+            return;
+        }
+
+        // 鉴权：连接的 playerId 必须与登录态一致，防止冒充他人订阅通知
+        Long authId = HttpSessionHandshakeConfigurator.getAuthorizedPlayerId(session);
+        if (authId == null) {
+            closeQuietly(session, CloseReason.CloseCodes.VIOLATED_POLICY, "请先登录");
+            return;
+        }
+        if (!authId.equals(playerId)) {
+            closeQuietly(session, CloseReason.CloseCodes.VIOLATED_POLICY, "无权访问他人通道");
             return;
         }
 
@@ -88,7 +95,18 @@ public class FriendWebSocketEndpoint {
     @OnError
     public void onError(Session session, @PathParam("playerId") Long playerId, Throwable error) {
         log.error("玩家 {} 的好友 WebSocket 发生错误: {}", playerId, error.getMessage());
-        sessionManager.unregister(playerId, "friend", session);
+        // @OnClose 会在 @OnError 之后自动调用，无需重复 unregister
+    }
+
+    /**
+     * 安全关闭连接，忽略关闭过程中的 IO 异常
+     */
+    private void closeQuietly(Session session, CloseReason.CloseCodes code, String reason) {
+        try {
+            session.close(new CloseReason(code, reason));
+        } catch (IOException e) {
+            log.error("关闭连接失败", e);
+        }
     }
 
     /**

@@ -13,7 +13,7 @@ public class PlayerPosition {
     private Long playerId;
     private String playerName;
     private Long roleId;
-    private int x;
-    private int y;
-    private String direction;   // UP / DOWN / LEFT / RIGHT / STOP
+    private volatile int x;
+    private volatile int y;
+    private volatile String direction;   // UP / DOWN / LEFT / RIGHT / STOP
 }

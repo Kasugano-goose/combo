@@ -71,12 +71,12 @@ public class MatchController {
      * 确认进入场景
      */
     @PostMapping("/confirm")
-    public void confirmMatch(HttpSession session) {
+    public Map<String, Object> confirmMatch(HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
             throw new IllegalArgumentException("请先登录");
         }
-        matchService.confirmMatch(playerId);
+        return matchService.confirmMatch(playerId);
     }
 
     /**

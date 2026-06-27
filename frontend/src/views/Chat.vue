@@ -41,9 +41,9 @@
 
           <div class="chat-input-area">
             <input v-model="inputText" placeholder="输入消息..."
-              @keyup.enter="sendMessage" :disabled="!connected" />
+              @keyup.enter="sendMessage" :disabled="!connected || !targetId" />
             <button class="action-button" @click="sendMessage"
-              :disabled="!connected || !inputText.trim()">
+              :disabled="!connected || !inputText.trim() || !targetId">
               发送
             </button>
           </div>
@@ -54,7 +54,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onUnmounted } from 'vue'
+import { ref, nextTick, onMounted } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import { useWebSocket } from '../composables/useWebSocket'
 
@@ -77,7 +77,7 @@ function addMessage(content, type = 'system', time = '') {
   scrollBottom()
 }
 
-const { connected, connect, disconnect, send } = useWebSocket(`/ws/chat/${store.playerId}`, {
+const { connected, connect, send } = useWebSocket(`/ws/chat/${store.playerId}`, {
   onMessage(data) {
     if (data.type === 'CHAT') {
       const time = data.timestamp ? new Date(data.timestamp).toLocaleTimeString() : ''
@@ -94,22 +94,25 @@ const { connected, connect, disconnect, send } = useWebSocket(`/ws/chat/${store.
   }
 })
 
+// 页面挂载时自动连接，不再依赖 startChat 触发
+onMounted(() => {
+  connect()
+})
+
 function startChat() {
   if (!targetId.value) return
   if (targetId.value === store.playerId) {
     alert('不能和自己聊天')
     return
   }
-  disconnect()
   messages.value = []
   chatTarget.value = `玩家 ${targetId.value}`
-  connect()
-  addMessage(`正在连接...`, 'system')
+  addMessage(`正在和 玩家${targetId.value} 聊天`, 'system')
 }
 
 function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || !connected.value) return
+  if (!text || !connected.value || !targetId.value) return
 
   send({ toPlayerId: targetId.value, content: text })
 
@@ -117,8 +120,4 @@ function sendMessage() {
   addMessage(text, 'sent', time)
   inputText.value = ''
 }
-
-onUnmounted(() => {
-  disconnect()
-})
 </script>

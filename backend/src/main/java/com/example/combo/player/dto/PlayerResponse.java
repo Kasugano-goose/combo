@@ -18,8 +18,6 @@ public class PlayerResponse {
 
     private String phone;
 
-    private String idCard;
-
     private BigDecimal balance;
 
     private Player.PlayerStatus status;
@@ -28,17 +26,19 @@ public class PlayerResponse {
 
     private Integer rankScore;
 
+    private Long selectedRoleId;
+
     public static PlayerResponse from(Player player) {
         return PlayerResponse.builder()
                 .id(player.getId())
                 .username(player.getUsername())
                 .realName(player.getRealName())
                 .phone(player.getPhone())
-                .idCard(player.getIdCard())
                 .balance(player.getBalance())
                 .status(player.getStatus())
                 .rank(player.getCurrentRank())
                 .rankScore(player.getRankScore())
+                .selectedRoleId(player.getSelectedRoleId())
                 .build();
     }
 }

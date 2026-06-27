@@ -1,5 +1,6 @@
 package com.example.combo.player.controller;
 
+import com.example.combo.common.exception.BusinessException;
 import com.example.combo.player.domain.Player;
 import com.example.combo.player.dto.ChangePasswordRequest;
 import com.example.combo.player.dto.LoginPlayerRequest;
@@ -8,10 +9,12 @@ import com.example.combo.player.dto.RegisterPlayerRequest;
 import com.example.combo.player.dto.SelectRoleRequest;
 import com.example.combo.player.dto.UpdateProfileRequest;
 import com.example.combo.player.service.PlayerService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
 @Slf4j
@@ -30,9 +33,12 @@ public class PlayerController {
     }
 
     @PostMapping("/login")
-    public PlayerResponse login(@Valid @RequestBody LoginPlayerRequest request, HttpSession session) {
+    public PlayerResponse login(@Valid @RequestBody LoginPlayerRequest request,
+                                HttpServletRequest httpRequest, HttpSession session) {
         Player player = playerService.login(request);
-        session.setAttribute("playerId",player.getId());
+        // 防御会话固定攻击：认证成功后轮换 session id
+        httpRequest.changeSessionId();
+        session.setAttribute("playerId", player.getId());
         return PlayerResponse.from(player);
     }
     @PostMapping("/logout")
@@ -45,7 +51,7 @@ public class PlayerController {
     public PlayerResponse me(HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         Player player = playerService.findById(playerId);
         return PlayerResponse.from(player);
@@ -56,7 +62,7 @@ public class PlayerController {
                                         HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         Player player = playerService.updateProfile(playerId, request);
         return PlayerResponse.from(player);
@@ -67,7 +73,7 @@ public class PlayerController {
                                HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         playerService.changePassword(playerId, request);
     }
@@ -77,7 +83,7 @@ public class PlayerController {
                                      HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         Player player = playerService.selectRole(playerId, request.getRoleId());
         return PlayerResponse.from(player);
@@ -87,7 +93,7 @@ public class PlayerController {
     public void disableAccount(HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         playerService.disablePlayer(playerId);
         session.invalidate();

@@ -18,6 +18,10 @@ export function useWebSocket(path, { onMessage, onOpen, onClose, onError } = {})
       return
     }
 
+    // 注意：不要在此处重置 reconnectAttempts。
+    // connect() 既被首次手动调用，也被自动重连的定时器调用；
+    // 若每次都清零，指数退避将永远停留在初始间隔且永远触发不了上限。
+    // 计数仅在「连接成功(onopen)」时重置，在「主动断开(disconnect)」时封顶。
     ws = new WebSocket(getUrl())
 
     ws.onopen = () => {
@@ -67,13 +71,13 @@ export function useWebSocket(path, { onMessage, onOpen, onClose, onError } = {})
       clearTimeout(reconnectTimer)
       reconnectTimer = null
     }
-    reconnectAttempts = MAX_RECONNECT_ATTEMPTS // 阻止自动重连
     if (ws) {
-      ws.onclose = null // 避免触发 onClose 回调
+      ws.onclose = null // 避免触发 onClose 回调与自动重连
       ws.close()
       ws = null
       connected.value = false
     }
+    reconnectAttempts = 0 // 复位，便于同一实例后续重新 connect()
   }
 
   function send(data) {

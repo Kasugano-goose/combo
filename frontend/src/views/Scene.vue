@@ -1,53 +1,97 @@
 <template>
-  <div class="scene-body">
-    <div class="scene-page">
-      <div class="scene-header">
-        <div>
-          <p class="eyebrow">ARENA</p>
-          <h1>竞技场</h1>
+  <div class="arena-body">
+    <div class="arena-shell">
+      <!-- 顶部状态条 -->
+      <div class="arena-topbar">
+        <div class="arena-title">
+          <p class="eyebrow">ARENA · 实时竞技</p>
+          <h1>竞技场 <span>#{{ sceneId }}</span></h1>
         </div>
-        <button class="secondary-button" @click="handleExit">
-          退出场景
-        </button>
+        <div class="arena-topbar-right">
+          <span class="arena-conn" :class="connected ? 'on' : 'off'">
+            <span class="dot"></span>{{ connected ? '已连接' : '连接中…' }}
+          </span>
+          <button class="arena-exit" @click="handleExit">退出场景</button>
+        </div>
       </div>
 
-      <div class="scene-layout">
-        <canvas ref="canvasRef" id="gameCanvas" width="800" height="600"></canvas>
-
-        <div class="scene-info-panel">
-          <div v-for="p in playerPositions" :key="p.playerId" class="scene-player-card">
-            <h3>{{ p.playerName }} {{ p.playerId === playerId ? '(你)' : '' }}</h3>
-            <div class="coord-display">
-              <span>X: <strong>{{ Math.round(p.x) }}</strong></span>
-              <span>Y: <strong>{{ Math.round(p.y) }}</strong></span>
-              <span>方向: <strong>{{ p.direction }}</strong></span>
+      <!-- VS 对战 HUD -->
+      <div class="arena-vs">
+        <div class="vs-card me" :style="{ '--c': meColor }">
+          <div class="vs-role" :style="{ background: meColor }">{{ meRole }}</div>
+          <div class="vs-meta">
+            <span class="vs-tag you">YOU</span>
+            <h3>{{ me?.playerName || '你' }}</h3>
+            <div class="vs-coord">
+              <span>X <b>{{ me ? Math.round(me.x) : '–' }}</b></span>
+              <span>Y <b>{{ me ? Math.round(me.y) : '–' }}</b></span>
+              <span class="vs-dir">{{ dirLabel(me?.direction) }}</span>
             </div>
           </div>
+        </div>
 
-          <div class="scene-controls-hint">
-            <h3>操作说明</h3>
-            <p>⬆⬇⬅➡ 方向键移动<br>松开方向键停止</p>
+        <div class="vs-mid"><span>VS</span></div>
+
+        <div class="vs-card opp" :style="{ '--c': oppColor }">
+          <div class="vs-meta right">
+            <span class="vs-tag">对手</span>
+            <h3>{{ opponent?.playerName || '等待对手…' }}</h3>
+            <div class="vs-coord">
+              <span class="vs-dir">{{ dirLabel(opponent?.direction) }}</span>
+              <span>X <b>{{ opponent ? Math.round(opponent.x) : '–' }}</b></span>
+              <span>Y <b>{{ opponent ? Math.round(opponent.y) : '–' }}</b></span>
+            </div>
           </div>
+          <div class="vs-role" :style="{ background: oppColor }">{{ oppRole }}</div>
+        </div>
+      </div>
+
+      <!-- 舞台 -->
+      <div class="arena-stage">
+        <canvas ref="canvasRef" id="gameCanvas" width="800" height="600"></canvas>
+      </div>
+
+      <!-- 操作提示 -->
+      <div class="arena-hint">
+        <span class="key-group">
+          <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
+          <span class="kbd-or">或</span>
+          <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 移动
+        </span>
+        <span class="dotsep"></span>
+        <span>松开按键停止</span>
+        <span class="dotsep"></span>
+        <span>服务端 100ms 权威同步</span>
+      </div>
+    </div>
+
+    <!-- 退出确认 -->
+    <div v-if="showExitConfirm" class="arena-overlay" @click.self="cancelExit">
+      <div class="arena-overlay-card">
+        <div class="overlay-icon">🚪</div>
+        <h2>退出场景？</h2>
+        <p>退出后本局将结束，对手也会收到通知。</p>
+        <div class="arena-confirm-actions">
+          <button class="arena-cancel-btn" @click="cancelExit">取消</button>
+          <button class="arena-exit-btn" @click="confirmExit">确定退出</button>
         </div>
       </div>
     </div>
 
     <!-- 场景结束遮罩 -->
-    <div v-if="overlay.show" class="scene-overlay">
-      <div class="overlay-content">
+    <div v-if="overlay.show" class="arena-overlay">
+      <div class="arena-overlay-card">
+        <div class="overlay-icon">⚔</div>
         <h2>{{ overlay.title }}</h2>
         <p>{{ overlay.message }}</p>
-        <router-link to="/home" class="match-button btn-lg"
-          style="display:inline-block; text-decoration:none; line-height:54px;">
-          返回主页
-        </router-link>
+        <router-link to="/home" class="arena-home-btn">返回主页</router-link>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore } from '../stores/player'
 import { useWebSocket } from '../composables/useWebSocket'
@@ -61,14 +105,23 @@ const sceneId = route.query.sceneId
 const canvasRef = ref(null)
 const playerPositions = ref([])
 const overlay = reactive({ show: false, title: '', message: '' })
+const showExitConfirm = ref(false)
+let exiting = false // 主动退出标记：避免退出时 onClose 再弹「连接断开」
 
 let sceneWidth = 800
 let sceneHeight = 600
 const roleColors = { 1: '#ff3b3b', 2: '#00f0ff', 3: '#39ff14', 4: '#ffaa00', 5: '#a855f7' }
+const roleNames = { 1: '战士', 2: '法师', 3: '刺客', 4: '坦克', 5: '辅助' }
 
-if (!sceneId) {
-  alert('缺少场景ID')
-  router.push('/home')
+// VS HUD 派生数据：区分「我方」与「对手」
+const me = computed(() => playerPositions.value.find(p => p.playerId === playerId) || null)
+const opponent = computed(() => playerPositions.value.find(p => p.playerId !== playerId) || null)
+const meColor = computed(() => roleColors[me.value?.roleId] || '#2563eb')
+const oppColor = computed(() => roleColors[opponent.value?.roleId] || '#dc2626')
+const meRole = computed(() => roleNames[me.value?.roleId] || '?')
+const oppRole = computed(() => roleNames[opponent.value?.roleId] || '?')
+function dirLabel(d) {
+  return ({ UP: '↑ 上', DOWN: '↓ 下', LEFT: '← 左', RIGHT: '→ 右', STOP: '■ 静止' })[d] || '· 待命'
 }
 
 const { connected, connect, disconnect, send } = useWebSocket(`/ws/scene/${sceneId}/${playerId}`, {
@@ -92,16 +145,18 @@ const { connected, connect, disconnect, send } = useWebSocket(`/ws/scene/${scene
     }
   },
   onClose() {
-    if (!overlay.show) {
+    if (!overlay.show && !exiting) {
       overlay.title = '连接断开'
-      overlay.message = '与场景服务器的连接已断开'
+      overlay.message = '与场景服务器的连接已断开，场景已结束'
       overlay.show = true
     }
   },
   onError() {
-    overlay.title = '连接失败'
-    overlay.message = '无法连接到场景服务器'
-    overlay.show = true
+    if (!overlay.show) {
+      overlay.title = '连接失败'
+      overlay.message = '无法连接到场景服务器'
+      overlay.show = true
+    }
   }
 })
 
@@ -174,27 +229,66 @@ function drawScene() {
 }
 
 function handleExit() {
-  send({ type: 'EXIT' })
-  setTimeout(() => router.push('/home'), 500)
+  // 先弹确认，避免误触直接退出
+  showExitConfirm.value = true
 }
 
+function confirmExit() {
+  exiting = true
+  showExitConfirm.value = false
+  send({ type: 'EXIT' })
+  setTimeout(() => router.push('/home'), 300)
+}
+
+function cancelExit() {
+  showExitConfirm.value = false
+}
+
+// 物理键码 → 方向：方向键与 WASD 都支持，用 e.code 避免大小写/输入法影响
+function codeToDir(code) {
+  switch (code) {
+    case 'ArrowUp': case 'KeyW': return 'UP'
+    case 'ArrowDown': case 'KeyS': return 'DOWN'
+    case 'ArrowLeft': case 'KeyA': return 'LEFT'
+    case 'ArrowRight': case 'KeyD': return 'RIGHT'
+    default: return null
+  }
+}
+
+const pressedKeys = new Set()
 function onKeyDown(e) {
-  const dirMap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT' }
-  const dir = dirMap[e.key]
+  if (e.repeat) return // 长按不重复发送
+  const dir = codeToDir(e.code)
   if (dir) {
     e.preventDefault()
+    pressedKeys.add(e.code)
     send({ type: 'MOVE', direction: dir })
   }
 }
 
 function onKeyUp(e) {
-  const dirMap = { ArrowUp: 'UP', ArrowDown: 'DOWN', ArrowLeft: 'LEFT', ArrowRight: 'RIGHT' }
-  if (dirMap[e.key]) {
-    send({ type: 'STOP' })
+  const dir = codeToDir(e.code)
+  if (dir) {
+    pressedKeys.delete(e.code)
+    if (pressedKeys.size === 0) {
+      send({ type: 'STOP' })
+    } else {
+      // 还有其他方向键按下，发送剩余方向
+      const remainingCode = pressedKeys.values().next().value
+      const remainingDir = codeToDir(remainingCode)
+      if (remainingDir) send({ type: 'MOVE', direction: remainingDir })
+    }
   }
 }
 
 onMounted(() => {
+  // 缺少场景ID时直接回主页（守卫放在 onMounted，避免把脚本逻辑包进 else 块
+  // 导致 handleExit 等函数被块级作用域隐藏、无法暴露给模板）
+  if (!sceneId) {
+    alert('缺少场景ID')
+    router.replace('/home')
+    return
+  }
   connect()
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)

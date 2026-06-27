@@ -1,4 +1,4 @@
-INSERT INTO player_rank (code, name, level, min_score, max_score, created_at, updated_at)
+INSERT IGNORE INTO player_rank (code, name, level, min_score, max_score, created_at, updated_at)
 VALUES
     ('BRONZE', '青铜', 1, 0, 999, NOW(), NOW()),
     ('SILVER', '白银', 2, 1000, 1999, NOW(), NOW()),
@@ -7,7 +7,7 @@ VALUES
     ('DIAMOND', '钻石', 5, 4000, 4999, NOW(), NOW()),
     ('MASTER', '大师', 6, 5000, 2147483647, NOW(), NOW());
 
-INSERT INTO game_role (code, name, description, created_at, updated_at)
+INSERT IGNORE INTO game_role (code, name, description, created_at, updated_at)
 VALUES
     ('WARRIOR', '战士', '近战输出角色，适合正面作战', NOW(), NOW()),
     ('MAGE', '法师', '远程法术角色，适合爆发输出', NOW(), NOW()),

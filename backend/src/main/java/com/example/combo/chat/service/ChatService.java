@@ -86,8 +86,12 @@ public class ChatService {
 
         try {
             String json = objectMapper.writeValueAsString(forwardMessage);
-            webSocketSessionManager.sendToUser(toPlayerId, json);
-            log.info("消息转发: 玩家{} → 玩家{}", fromPlayerId, toPlayerId);
+            boolean sent = webSocketSessionManager.sendToEndpoint(toPlayerId, "chat", json);
+            if (sent) {
+                log.info("消息转发: 玩家{} → 玩家{}", fromPlayerId, toPlayerId);
+            } else {
+                sendError(fromPlayerId, "消息发送失败，对方聊天连接不可用");
+            }
         } catch (Exception e) {
             log.error("消息转发失败", e);
             sendError(fromPlayerId, "消息发送失败");
@@ -113,7 +117,7 @@ public class ChatService {
             errorMessage.setContent(errorMsg);
             errorMessage.setTimestamp(LocalDateTime.now().toString());
             String json = objectMapper.writeValueAsString(errorMessage);
-            webSocketSessionManager.sendToUser(playerId, json);
+            webSocketSessionManager.sendToEndpoint(playerId, "chat", json);
         } catch (Exception e) {
             log.error("发送错误消息失败: {}", errorMsg, e);
         }

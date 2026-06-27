@@ -17,10 +17,15 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.ScanOptions;
+
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -69,7 +74,7 @@ public class MatchService {
     private static final String PENDING_NOTIFICATION_PREFIX = "match:pending:notify:";
     private static final long PENDING_NOTIFICATION_TTL_SECONDS = 300L; // 5 分钟过期
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
 
     private RedisScript<Long> confirmScript;
     private RedisScript<Long> matchAndRemoveScript;
@@ -154,8 +159,9 @@ public class MatchService {
                 throw new IllegalArgumentException("你已在匹配池中，请耐心等待");
             }
 
-            long now = System.currentTimeMillis();
-            redisTemplate.opsForZSet().add(MATCH_POOL_KEY, playerId.toString(), (double) now);
+            // 使用 rankScore 作为 ZSet score，使 rangeByScore 按分数范围查询生效
+            double rankScore = player.getRankScore() != null ? player.getRankScore() : 0;
+            redisTemplate.opsForZSet().add(MATCH_POOL_KEY, playerId.toString(), rankScore);
 
             String playerKey = MATCH_PLAYER_PREFIX + playerId;
             Map<String, String> playerInfo = new HashMap<>();
@@ -163,6 +169,7 @@ public class MatchService {
             playerInfo.put("rankScore", String.valueOf(player.getRankScore()));
             playerInfo.put("rankLevel", String.valueOf(player.getCurrentRank().getLevel()));
             playerInfo.put("selectedRoleId", String.valueOf(player.getSelectedRoleId()));
+            playerInfo.put("joinedAt", String.valueOf(System.currentTimeMillis()));
             redisTemplate.opsForHash().putAll(playerKey, playerInfo);
 
             log.info("玩家 {} 加入匹配池，当前匹配池人数: {}", playerId, getWaitingCount());
@@ -247,8 +254,21 @@ public class MatchService {
                 );
 
                 if (result == null || result == 0) {
-                    // 对手已被其他人匹配，继续尝试下一个
-                    log.debug("玩家 {} 已被其他人匹配，跳过", opponentId);
+                    // 对手已被其他人匹配或已调用 leaveMatch 退出池，继续尝试下一个
+                    // matchAndRemoveScript 原子性保证：若对手同时调用 leaveMatch，
+                    // 脚本会返回 0（对手已不在池中），不会产生脏数据
+                    log.debug("玩家 {} 已不在匹配池中，跳过", opponentId);
+                    continue;
+                }
+
+                // 防御性校验：Lua 脚本已原子移除双方，验证双方确实不在池中
+                // （防止并发 leaveMatch 导致不一致状态）
+                if (redisTemplate.opsForZSet().score(MATCH_POOL_KEY, player.getId().toString()) != null
+                        || redisTemplate.opsForZSet().score(MATCH_POOL_KEY, opponentId.toString()) != null) {
+                    log.warn("匹配后检测到异常：玩家仍在匹配池中，重新清理并跳过: player={}, opponent={}",
+                            player.getId(), opponentId);
+                    removePlayerFromPool(player.getId());
+                    removePlayerFromPool(opponentId);
                     continue;
                 }
 
@@ -305,7 +325,7 @@ public class MatchService {
     /**
      * 玩家确认进入场景（使用 Lua 脚本保证原子性）
      */
-    public void confirmMatch(Long playerId) {
+    public Map<String, Object> confirmMatch(Long playerId) {
         String playerKey = MATCH_PLAYER_PAIR_PREFIX + playerId;
         String pairId = redisTemplate.opsForValue().get(playerKey);
 
@@ -334,12 +354,16 @@ public class MatchService {
                 throw new IllegalArgumentException("你不属于该匹配对");
             case (int) CONFIRM_ALREADY_DONE:
                 log.info("玩家 {} 已确认过，忽略重复操作", playerId);
-                throw new IllegalArgumentException("你已确认，等待对方确认");
+                Map<String, Object> alreadyResult = new HashMap<>();
+                alreadyResult.put("status", "alreadyConfirmed");
+                return alreadyResult;
             case (int) CONFIRM_BOTH_DONE:
                 // 双方都已确认，创建场景
                 log.info("双方都已确认，创建场景, pairKey={}", pairKey);
                 handleBothConfirmed(pairKey, playerId);
-                break;
+                Map<String, Object> bothResult = new HashMap<>();
+                bothResult.put("status", "bothConfirmed");
+                return bothResult;
             case (int) CONFIRM_ONE_DONE:
                 // 仅当前玩家确认，通知对手
                 log.info("玩家 {} 已确认，等待对方确认", playerId);
@@ -347,7 +371,9 @@ public class MatchService {
                 if (opponentId != null) {
                     notifyOpponentConfirmed(opponentId);
                 }
-                break;
+                Map<String, Object> oneResult = new HashMap<>();
+                oneResult.put("status", "waitingForOpponent");
+                return oneResult;
             default:
                 log.error("未知的 Lua 返回值: {}, playerId={}, pairKey={}", result, playerId, pairKey);
                 throw new RuntimeException("未知的确认结果");
@@ -380,6 +406,17 @@ public class MatchService {
 
         if (playerIds == null) {
             log.error("无法获取匹配对玩家信息，临时 key 已过期: {}", tempKey);
+            // 从 pairKey 获取玩家 ID，通知双方确认失败需重新匹配
+            Map<Object, Object> pairData = redisTemplate.opsForHash().entries(pairKey);
+            if (!pairData.isEmpty()) {
+                Long p1 = Long.parseLong(pairData.get("player1Id").toString());
+                Long p2 = Long.parseLong(pairData.get("player2Id").toString());
+                Map<String, Object> errorNotification = new HashMap<>();
+                errorNotification.put("type", "CONFIRM_FAILED");
+                errorNotification.put("message", "确认超时，请重新匹配");
+                sendWithRetry(p1, errorNotification);
+                sendWithRetry(p2, errorNotification);
+            }
             return;
         }
 
@@ -476,7 +513,7 @@ public class MatchService {
     /**
      * 异步发送通知，带渐进式重试和 Redis 持久化兜底
      *
-     * 重试策略：总窗口 30 秒，渐进式间隔（1s, 2s, 3s, 5s, 5s, 7s, 7s）
+     * 重试策略：总窗口 ~65 秒，渐进式间隔（1s, 2s, 3s, 5s, 5s, 7s, 7s, 10s, 10s, 15s）
      * 全部失败后存入 Redis List，玩家重连时自动拉取
      */
     private void sendWithRetry(Long playerId, Map<String, Object> notification) {
@@ -484,14 +521,14 @@ public class MatchService {
             try {
                 String json = objectMapper.writeValueAsString(notification);
                 String type = (String) notification.get("type");
-                int[] delays = {1000, 2000, 3000, 5000, 5000, 7000, 7000, 10000, 10000, 15000}; // 渐进式间隔，总计 ~58s
+                int[] delays = {1000, 2000, 3000, 5000, 5000, 7000, 7000, 10000, 10000, 15000}; // 渐进式间隔，总计 ~65s
 
                 for (int i = 0; i < delays.length; i++) {
                     // 每次发送前打印当前会话状态
                     String status = webSocketSessionManager.getSessionStatus(playerId);
                     log.info("发送通知给玩家 {} [type={}, 第{}次]，会话状态: {}", playerId, type, i + 1, status);
 
-                    boolean sent = webSocketSessionManager.sendToUser(playerId, json);
+                    boolean sent = webSocketSessionManager.sendToEndpoint(playerId, "friend", json);
                     if (sent) {
                         log.info("通知已发送给玩家 {} [type={}, 第{}次尝试]", playerId, type, i + 1);
                         return;
@@ -526,15 +563,19 @@ public class MatchService {
 
     /**
      * 玩家重连时拉取未送达通知（由 WebSocket @OnOpen 调用）
+     * 使用 leftPop 循环逐条弹出，保证原子性（不会在 range 和 delete 之间丢失通知）
      */
     public List<String> pullPendingNotifications(Long playerId) {
         String key = PENDING_NOTIFICATION_PREFIX + playerId;
-        List<String> notifications = redisTemplate.opsForList().range(key, 0, -1);
-        if (notifications != null && !notifications.isEmpty()) {
-            redisTemplate.delete(key);
+        List<String> notifications = new ArrayList<>();
+        String notification;
+        while ((notification = redisTemplate.opsForList().leftPop(key)) != null) {
+            notifications.add(notification);
+        }
+        if (!notifications.isEmpty()) {
             log.info("玩家 {} 拉取 {} 条待补偿通知", playerId, notifications.size());
         }
-        return notifications != null ? notifications : List.of();
+        return notifications;
     }
 
     /**
@@ -549,17 +590,24 @@ public class MatchService {
      */
     @Scheduled(fixedRate = 10000)
     public void cleanExpiredPlayers() {
-        long expireThreshold = System.currentTimeMillis() - MATCH_TIMEOUT_MS;
-        Set<String> expiredMembers = redisTemplate.opsForZSet()
-                .rangeByScore(MATCH_POOL_KEY, 0, expireThreshold);
+        // ZSet score 是 rankScore，不能用于判断超时；改为遍历所有成员并检查 joinedAt
+        Set<String> allMembers = redisTemplate.opsForZSet().range(MATCH_POOL_KEY, 0, -1);
+        if (allMembers == null || allMembers.isEmpty()) return;
 
-        if (expiredMembers == null || expiredMembers.isEmpty()) return;
-
-        for (String memberId : expiredMembers) {
-            Long playerId = Long.parseLong(memberId);
-            log.info("玩家 {} 匹配超时", playerId);
-            removePlayerFromPool(playerId);
-            notifyMatchTimeout(playerId);
+        for (String memberId : allMembers) {
+            String playerKey = MATCH_PLAYER_PREFIX + memberId;
+            Object joinedAtObj = redisTemplate.opsForHash().get(playerKey, "joinedAt");
+            if (joinedAtObj == null) {
+                // 无加入时间记录，跳过（不应发生）
+                continue;
+            }
+            long joinedAt = Long.parseLong(joinedAtObj.toString());
+            if (System.currentTimeMillis() - joinedAt > MATCH_TIMEOUT_MS) {
+                Long playerId = Long.parseLong(memberId);
+                log.info("玩家 {} 匹配超时", playerId);
+                removePlayerFromPool(playerId);
+                notifyMatchTimeout(playerId);
+            }
         }
     }
 
@@ -572,8 +620,18 @@ public class MatchService {
      */
     @Scheduled(fixedRate = 10000)
     public void cleanExpiredMatchPairIndexes() {
-        Set<String> playerKeys = redisTemplate.keys(MATCH_PLAYER_PAIR_PREFIX + "*");
-        if (playerKeys == null || playerKeys.isEmpty()) return;
+        // 使用 SCAN 替代 KEYS 避免阻塞 Redis
+        Set<String> playerKeys = new HashSet<>();
+        redisTemplate.execute((org.springframework.data.redis.core.RedisCallback<Void>) connection -> {
+            try (Cursor<byte[]> cursor = connection.scan(
+                    ScanOptions.scanOptions().match(MATCH_PLAYER_PAIR_PREFIX + "*").count(100).build())) {
+                while (cursor.hasNext()) {
+                    playerKeys.add(new String(cursor.next()));
+                }
+            }
+            return null;
+        });
+        if (playerKeys.isEmpty()) return;
 
         for (String playerKey : playerKeys) {
             // 安全检查：TTL 过长说明刚创建，跳过（防止与 createMatchPairInRedis 竞态）
@@ -652,12 +710,16 @@ public class MatchService {
         }
 
         // 2. 没有匹配对，再查匹配池（等待匹配中）
+        // ZSet score 是 rankScore，超时需从 playerInfo hash 的 joinedAt 计算
         Double score = redisTemplate.opsForZSet().score(MATCH_POOL_KEY, playerIdStr);
         if (score != null) {
-            long waitTime = System.currentTimeMillis() - score.longValue();
+            String playerKey = MATCH_PLAYER_PREFIX + playerIdStr;
+            Object joinedAtObj = redisTemplate.opsForHash().get(playerKey, "joinedAt");
+            long joinedAt = joinedAtObj != null ? Long.parseLong(joinedAtObj.toString()) : System.currentTimeMillis();
+            long waitTime = System.currentTimeMillis() - joinedAt;
             status.put("inPool", true);
             status.put("waitingTime", waitTime);
-            status.put("timeout", MATCH_TIMEOUT_MS - waitTime);
+            status.put("timeout", Math.max(0, MATCH_TIMEOUT_MS - waitTime));
             status.put("hasPendingMatch", false);
         } else {
             status.put("inPool", false);

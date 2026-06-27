@@ -13,12 +13,12 @@ public class Scene {
     private int sceneWidth;
     private int sceneHeight;
     private int speed = 10;
-    private SceneStatus status;
-    private ScheduledFuture<?> gameLoopTask;
+    private volatile SceneStatus status;
+    private volatile ScheduledFuture<?> gameLoopTask;
 
     // 存储双方的 Scene WebSocket Session（游戏循环直接用它发消息）
-    private Session player1Session;
-    private Session player2Session;
+    private volatile Session player1Session;
+    private volatile Session player2Session;
 
     public enum SceneStatus {
         ACTIVE,

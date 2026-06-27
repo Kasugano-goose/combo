@@ -6,8 +6,10 @@ import com.example.combo.friendship.domain.Friendship.FriendshipStatus;
 import com.example.combo.friendship.repository.FriendshipRepository;
 import com.example.combo.player.domain.Player;
 import com.example.combo.player.repository.PlayerRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -16,12 +18,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class FriendshipService {
     private final PlayerRepository playerRepository;
     private final FriendshipRepository friendshipRepository;
     private final WebSocketSessionManager webSocketSessionManager;
+    private final ObjectMapper objectMapper;
 
     @Transactional
     public void sendFriend(Long senderId, Long receiverId) {
@@ -54,8 +58,9 @@ public class FriendshipService {
                 .build();
         friendshipRepository.save(friendship);
 
-        String notification = buildFriendRequestNotification(sender, friendship);
-        webSocketSessionManager.sendToUser(receiverId, notification);
+        String notification = buildNotification("FRIEND_REQUEST", friendship.getId(), sender,
+                sender.getUsername() + " 请求添加你为好友");
+        webSocketSessionManager.sendToEndpoint(receiverId, "friend", notification);
     }
 
     @Transactional
@@ -87,8 +92,9 @@ public class FriendshipService {
 
         Player acceptor = playerRepository.findById(receiverId).orElse(null);
         if (acceptor != null) {
-            String notification = buildAcceptNotification(acceptor, friendship);
-            webSocketSessionManager.sendToUser(friendship.getRequesterId(), notification);
+            String notification = buildNotification("FRIEND_ACCEPTED", friendship.getId(), acceptor,
+                    acceptor.getUsername() + " 已接受你的好友申请");
+            webSocketSessionManager.sendToEndpoint(friendship.getRequesterId(), "friend", notification);
         }
     }
 
@@ -121,8 +127,9 @@ public class FriendshipService {
 
         Player rejector = playerRepository.findById(receiverId).orElse(null);
         if (rejector != null) {
-            String notification = buildRejectNotification(rejector, friendship);
-            webSocketSessionManager.sendToUser(friendship.getRequesterId(), notification);
+            String notification = buildNotification("FRIEND_REJECTED", friendship.getId(), rejector,
+                    rejector.getUsername() + " 拒绝了你的好友申请");
+            webSocketSessionManager.sendToEndpoint(friendship.getRequesterId(), "friend", notification);
         }
     }
 
@@ -143,6 +150,7 @@ public class FriendshipService {
     }
 
     public List<Map<String, Object>> getFriendList(Long playerId) {
+        // 我的好友：我主动添加且对方已通过 + 对方添加我且我已通过
         List<Friendship> sent = friendshipRepository
                 .findByRequesterIdAndStatusOrderByUpdatedAtDesc(playerId, FriendshipStatus.ACCEPTED);
         List<Friendship> received = friendshipRepository
@@ -180,54 +188,18 @@ public class FriendshipService {
         return item;
     }
 
-    private String buildFriendRequestNotification(Player sender, Friendship friendship) {
-        return String.format("""
-                {
-                    "type": "FRIEND_REQUEST",
-                    "friendshipId": %d,
-                    "fromUserId": %d,
-                    "fromUsername": "%s",
-                    "message": "%s 请求添加你为好友"
-                }
-                """,
-                friendship.getId(),
-                sender.getId(),
-                sender.getUsername(),
-                sender.getUsername()
-        );
-    }
-
-    private String buildRejectNotification(Player rejector, Friendship friendship) {
-        return String.format("""
-                {
-                    "type": "FRIEND_REJECTED",
-                    "friendshipId": %d,
-                    "fromUserId": %d,
-                    "fromUsername": "%s",
-                    "message": "%s 拒绝了你的好友申请"
-                }
-                """,
-                friendship.getId(),
-                rejector.getId(),
-                rejector.getUsername(),
-                rejector.getUsername()
-        );
-    }
-
-    private String buildAcceptNotification(Player acceptor, Friendship friendship) {
-        return String.format("""
-                {
-                    "type": "FRIEND_ACCEPTED",
-                    "friendshipId": %d,
-                    "fromUserId": %d,
-                    "fromUsername": "%s",
-                    "message": "%s 已接受你的好友申请"
-                }
-                """,
-                friendship.getId(),
-                acceptor.getId(),
-                acceptor.getUsername(),
-                acceptor.getUsername()
-        );
+    private String buildNotification(String type, Long friendshipId, Player player, String message) {
+        try {
+            Map<String, Object> notification = new HashMap<>();
+            notification.put("type", type);
+            notification.put("friendshipId", friendshipId);
+            notification.put("fromUserId", player.getId());
+            notification.put("fromUsername", player.getUsername());
+            notification.put("message", message);
+            return objectMapper.writeValueAsString(notification);
+        } catch (Exception e) {
+            log.error("构建通知消息失败: type={}, playerId={}", type, player.getId(), e);
+            return "{}";
+        }
     }
 }
