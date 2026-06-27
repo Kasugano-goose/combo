@@ -84,12 +84,18 @@ public class Player {
         DISABLED
     }
 
+    /**
+     * 玩家段位枚举，按积分区间划分。
+     *
+     * <p>level 用于相邻段位匹配校验（段位差 ≤ 1 可匹配）。
+     */
     public enum PlayerRank {
         BRONZE(1, 0, 999),
         SILVER(2, 1000, 1999),
         GOLD(3, 2000, 2999),
         PLATINUM(4, 3000, 3999),
         DIAMOND(5, 4000, 4999),
+        /** MASTER 段位无积分上限，maxScore 使用 Integer.MAX_VALUE 作为哨兵值。 */
         MASTER(6, 5000, Integer.MAX_VALUE);
 
         private final int level;
@@ -114,6 +120,12 @@ public class Player {
             return maxScore;
         }
 
+        /**
+         * 根据积分查找对应段位。
+         *
+         * @param score 玩家积分（非负整数）
+         * @return 对应的 PlayerRank，未匹配时返回 BRONZE 作为兜底
+         */
         public static PlayerRank fromScore(int score) {
             for (PlayerRank rank : values()) {
                 if (score >= rank.minScore && score <= rank.maxScore) {
