@@ -1,8 +1,10 @@
 package com.example.combo.scene.controller;
 
+import com.example.combo.common.exception.BusinessException;
 import com.example.combo.scene.service.SceneService;
 import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,7 +23,7 @@ public class SceneController {
     public void exitScene(HttpSession session) {
         Long playerId = (Long) session.getAttribute("playerId");
         if (playerId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         sceneService.handleExit(playerId);
     }

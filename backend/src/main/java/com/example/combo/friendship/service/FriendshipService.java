@@ -1,6 +1,7 @@
 package com.example.combo.friendship.service;
 
 import com.example.combo.common.websocket.WebSocketSessionManager;
+import com.example.combo.common.exception.BusinessException;
 import com.example.combo.friendship.domain.Friendship;
 import com.example.combo.friendship.domain.Friendship.FriendshipStatus;
 import com.example.combo.friendship.repository.FriendshipRepository;
@@ -10,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -30,7 +32,7 @@ public class FriendshipService {
     @Transactional
     public void sendFriend(Long senderId, Long receiverId) {
         if (senderId == null) {
-            throw new IllegalArgumentException("请先登录");
+            throw new BusinessException("请先登录", HttpStatus.UNAUTHORIZED);
         }
         if (receiverId == null) {
             throw new IllegalArgumentException("好友ID不能为空");
