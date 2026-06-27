@@ -127,15 +127,10 @@ public class PlayerService {
                 && playerRepository.existsByPhone(request.getPhone())) {
             throw new BusinessException("手机号已存在");
         }
-        if (!player.getIdCard().equals(request.getIdCard())
-                && playerRepository.existsByIdCard(request.getIdCard())) {
-            throw new BusinessException("身份证号已存在");
-        }
 
         player.setUsername(request.getUsername());
         player.setRealName(request.getRealName());
         player.setPhone(request.getPhone());
-        player.setIdCard(request.getIdCard());
         player.setUpdatedAt(LocalDateTime.now());
 
         return playerRepository.save(player);
