@@ -1,4 +1,4 @@
-INSERT INTO player_rank (code, name, level, min_score, max_score)
+INSERT IGNORE INTO player_rank (code, name, level, min_score, max_score)
 VALUES
     ('BRONZE', '青铜', 1, 0, 999),
     ('SILVER', '白银', 2, 1000, 1999),
@@ -7,7 +7,7 @@ VALUES
     ('DIAMOND', '钻石', 5, 4000, 4999),
     ('MASTER', '大师', 6, 5000, 2147483647);
 
-INSERT INTO game_role (code, name, description)
+INSERT IGNORE INTO game_role (code, name, description)
 VALUES
     ('WARRIOR', '战士', '近战输出角色，适合正面作战'),
     ('MAGE', '法师', '远程法术角色，适合爆发输出'),

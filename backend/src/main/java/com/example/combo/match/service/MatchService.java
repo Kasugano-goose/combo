@@ -52,6 +52,9 @@ public class MatchService {
     // 超时配置
     private static final long MATCH_TIMEOUT_MS = 60000L;           // 匹配池等待超时 60s
     private static final long MATCH_PAIRS_TTL_SECONDS = 120L;      // 匹配对有效期 120s（原 30s 过短，确认期间可能过期）
+    // 玩家索引 TTL 必须比匹配对更长：匹配对过期后、索引仍存活的这段窗口内，
+    // cleanExpiredMatchPairIndexes 才能扫描到残留索引并通知双方确认超时（CONFIRM_TIMEOUT）
+    private static final long MATCH_PLAYER_INDEX_TTL_SECONDS = MATCH_PAIRS_TTL_SECONDS + 30L; // 150s
     private static final long LOCK_WAIT_TIMEOUT_MS = 3000L;        // 获取锁最大等待 3s
     private static final long LOCK_HOLD_TIMEOUT_SECONDS = 30L;     // 锁持有时间 30s（原 5s 过短，含 DB 查询+匹配遍历）
 
@@ -293,8 +296,8 @@ public class MatchService {
                 operations.multi();
                 operations.opsForHash().putAll(pairKey, pairData);
                 operations.expire(pairKey, Duration.ofSeconds(MATCH_PAIRS_TTL_SECONDS));
-                operations.opsForValue().set(player1Key, pairId, Duration.ofSeconds(MATCH_PAIRS_TTL_SECONDS));
-                operations.opsForValue().set(player2Key, pairId, Duration.ofSeconds(MATCH_PAIRS_TTL_SECONDS));
+                operations.opsForValue().set(player1Key, pairId, Duration.ofSeconds(MATCH_PLAYER_INDEX_TTL_SECONDS));
+                operations.opsForValue().set(player2Key, pairId, Duration.ofSeconds(MATCH_PLAYER_INDEX_TTL_SECONDS));
                 return operations.exec();
             }
         });
@@ -310,13 +313,18 @@ public class MatchService {
         String pairId = redisTemplate.opsForValue().get(playerKey);
 
         if (pairId == null) {
-            throw new IllegalArgumentException("没有待确认的匹配");
+            throw new IllegalArgumentException("没有待确认的匹配，可能已超时，请重新匹配");
         }
 
         String pairKey = MATCH_PAIR_PREFIX + pairId;
 
+        // 提前解析对手 ID：作为 KEYS[3] 传给 Lua（避免脚本内硬编码 key 名），
+        // 确认成功后通知对手时复用同一次读取
+        Long opponentId = getOpponentIdFromPair(pairKey, playerId);
+        String opponentKey = opponentId != null ? MATCH_PLAYER_PAIR_PREFIX + opponentId : playerKey;
+
         // 执行 Lua 脚本
-        List<String> keys = Arrays.asList(pairKey, playerKey);
+        List<String> keys = Arrays.asList(pairKey, playerKey, opponentKey);
         Long result = redisTemplate.execute(confirmScript, keys, playerId.toString());
 
         if (result == null) {
@@ -343,7 +351,6 @@ public class MatchService {
             case (int) CONFIRM_ONE_DONE:
                 // 仅当前玩家确认，通知对手
                 log.info("玩家 {} 已确认，等待对方确认", playerId);
-                Long opponentId = getOpponentIdFromPair(pairKey, playerId);
                 if (opponentId != null) {
                     notifyOpponentConfirmed(opponentId);
                 }
@@ -360,12 +367,14 @@ public class MatchService {
     private Long getOpponentIdFromPair(String pairKey, Long playerId) {
         Map<Object, Object> pairData = redisTemplate.opsForHash().entries(pairKey);
 
-        if (pairData.isEmpty()) {
+        Object player1 = pairData.get("player1Id");
+        Object player2 = pairData.get("player2Id");
+        if (player1 == null || player2 == null) {
             return null;
         }
 
-        Long player1Id = Long.parseLong(pairData.get("player1Id").toString());
-        Long player2Id = Long.parseLong(pairData.get("player2Id").toString());
+        Long player1Id = Long.parseLong(player1.toString());
+        Long player2Id = Long.parseLong(player2.toString());
 
         return player1Id.equals(playerId) ? player2Id : player1Id;
     }
@@ -564,10 +573,14 @@ public class MatchService {
     }
 
     /**
-     * 定时清理残留的玩家索引（当匹配对已过期但索引未清理时）
+     * 定时清理残留的玩家索引（当匹配对已过期但索引未清理时），并通知双方确认超时
+     *
+     * 触发前提：玩家索引 TTL（150s）比匹配对 TTL（120s）长 30s，
+     * 匹配对过期后、索引消失前存在扫描窗口，此时即可判定"确认超时"。
+     * 首次确认时 confirm.lua 会同时续期匹配对与双方索引，维持该 TTL 差值。
      *
      * 安全措施：
-     * 1. 检查 playerKey 剩余 TTL，刚创建（>100s）的跳过，避免与 createMatchPairInRedis 竞态
+     * 1. 检查 playerKey 剩余 TTL，刚创建/续期（>110s）的跳过，避免与 createMatchPairInRedis 竞态
      * 2. 二次验证 playerKey 的 pairId 是否仍然匹配，防止误删刚创建的新索引
      */
     @Scheduled(fixedRate = 10000)
@@ -576,10 +589,10 @@ public class MatchService {
         if (playerKeys == null || playerKeys.isEmpty()) return;
 
         for (String playerKey : playerKeys) {
-            // 安全检查：TTL 过长说明刚创建，跳过（防止与 createMatchPairInRedis 竞态）
+            // 安全检查：TTL 过长说明刚创建/续期，跳过（防止与 createMatchPairInRedis 竞态）
             Long ttl = redisTemplate.getExpire(playerKey, TimeUnit.SECONDS);
             if (ttl != null && ttl > (MATCH_PAIRS_TTL_SECONDS - 10)) {
-                // 索引创建不足 10 秒，跳过
+                // 索引创建/续期不足 10 秒，跳过
                 continue;
             }
 

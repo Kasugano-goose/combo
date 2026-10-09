@@ -20,7 +20,7 @@
 - 段位匹配算法（段位差 ≤ 1 级，分数差 ≤ 300）
 - 60 秒匹配超时自动清理
 - **双方确认机制**：匹配成功后双方需各自确认才能进入场景
-- 30 秒确认超时自动取消
+- 确认超时自动取消（匹配对 TTL 120 秒，超时后定时任务通知双方）
 - **分布式锁**：基于 Redis SETNX 实现，支持多实例部署
 - **Lua 脚本**：保证匹配确认、匹配移除、锁释放的原子性
 
@@ -170,7 +170,9 @@ cd backend
 ./mvnw spring-boot:run
 ```
 
-后端启动后自动执行 `schema.sql`（建表）和 `data.sql`（种子数据）。
+后端启动后自动执行 `schema.sql`（建表）和 `data.sql`（种子数据），脚本幂等、可重复执行。
+
+数据库/Redis 连接支持环境变量注入（`DB_USERNAME`、`DB_PASSWORD`、`REDIS_HOST`、`REDIS_PORT`），不设置时使用 `application.properties` 中的本地开发默认值。
 
 ### 4. 启动前端
 
@@ -248,7 +250,7 @@ Player2 加入匹配池 → 匹配成功
 
 1. WebSocket Session 注册时序问题 → 改为双方确认机制
 2. 三人同时匹配的并发竞态 → 分布式锁 + Lua 脚本原子操作
-3. 确认阶段无超时 → Redis TTL 自动过期 + 定时清理残留索引
+3. 确认阶段无超时 → 匹配对 TTL 120s + 玩家索引 TTL 150s 差值窗口，定时任务扫描残留索引后通知双方 CONFIRM_TIMEOUT
 4. ConcurrentHashMap 分布式不共享 → 迁移到 Redis 存储
 5. synchronized 跨 JVM 无效 → 基于 Redis SETNX 的分布式锁
 6. WebSocket Session 覆盖 → 支持多端点的 SessionManager

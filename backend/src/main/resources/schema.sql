@@ -1,4 +1,7 @@
-CREATE TABLE player_rank (
+-- 幂等建表脚本：应用启动时自动执行（spring.sql.init.mode=always），可重复运行
+-- 注意：索引内联在建表语句中（MySQL 的 CREATE INDEX 不支持 IF NOT EXISTS）
+
+CREATE TABLE IF NOT EXISTS player_rank (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     code VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(32) NOT NULL,
@@ -9,7 +12,7 @@ CREATE TABLE player_rank (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
-CREATE TABLE game_role (
+CREATE TABLE IF NOT EXISTS game_role (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     code VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(32) NOT NULL,
@@ -18,7 +21,7 @@ CREATE TABLE game_role (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
-CREATE TABLE player (
+CREATE TABLE IF NOT EXISTS player (
     id BIGINT PRIMARY KEY,
     username VARCHAR(64) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
@@ -33,14 +36,13 @@ CREATE TABLE player (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_player_rank FOREIGN KEY (rank_id) REFERENCES player_rank (id),
-    CONSTRAINT fk_player_selected_role FOREIGN KEY (selected_role_id) REFERENCES game_role (id)
+    CONSTRAINT fk_player_selected_role FOREIGN KEY (selected_role_id) REFERENCES game_role (id),
+    KEY idx_player_rank_score (rank_score),
+    KEY idx_player_rank_id (rank_id),
+    KEY idx_player_selected_role_id (selected_role_id)
 );
 
-CREATE INDEX idx_player_rank_score ON player (rank_score);
-CREATE INDEX idx_player_rank_id ON player (rank_id);
-CREATE INDEX idx_player_selected_role_id ON player (selected_role_id);
-
-CREATE TABLE friendship (
+CREATE TABLE IF NOT EXISTS friendship (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     requester_id BIGINT NOT NULL,
     addressee_id BIGINT NOT NULL,
@@ -49,9 +51,8 @@ CREATE TABLE friendship (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_friendship_requester FOREIGN KEY (requester_id) REFERENCES player (id),
     CONSTRAINT fk_friendship_addressee FOREIGN KEY (addressee_id) REFERENCES player (id),
-    CONSTRAINT uk_friendship_request_pair UNIQUE (requester_id, addressee_id)
+    CONSTRAINT uk_friendship_request_pair UNIQUE (requester_id, addressee_id),
+    KEY idx_friendship_requester_status (requester_id, status),
+    KEY idx_friendship_addressee_status (addressee_id, status),
+    KEY idx_friendship_pair_status (requester_id, addressee_id, status)
 );
-
-CREATE INDEX idx_friendship_requester_status ON friendship (requester_id, status);
-CREATE INDEX idx_friendship_addressee_status ON friendship (addressee_id, status);
-CREATE INDEX idx_friendship_pair_status ON friendship (requester_id, addressee_id, status);
