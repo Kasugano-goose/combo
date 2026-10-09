@@ -485,15 +485,15 @@ public class MatchService {
     /**
      * 异步发送通知，带渐进式重试和 Redis 持久化兜底
      *
-     * 重试策略：总窗口 30 秒，渐进式间隔（1s, 2s, 3s, 5s, 5s, 7s, 7s）
-     * 全部失败后存入 Redis List，玩家重连时自动拉取
+     * 重试策略：最多 10 次尝试，间隔递增（1s, 2s, 3s, 5s, 5s, 7s, 7s, 10s, 10s, 15s），
+     * 重试窗口累计约 65 秒；全部失败后存入 Redis List，玩家重连时自动拉取
      */
     private void sendWithRetry(Long playerId, Map<String, Object> notification) {
         scheduler.execute(() -> {
             try {
                 String json = objectMapper.writeValueAsString(notification);
                 String type = (String) notification.get("type");
-                int[] delays = {1000, 2000, 3000, 5000, 5000, 7000, 7000, 10000, 10000, 15000}; // 渐进式间隔，总计 ~58s
+                int[] delays = {1000, 2000, 3000, 5000, 5000, 7000, 7000, 10000, 10000, 15000}; // 渐进式间隔，重试窗口累计 65s
 
                 for (int i = 0; i < delays.length; i++) {
                     // 每次发送前打印当前会话状态
