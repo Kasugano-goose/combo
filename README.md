@@ -244,6 +244,23 @@ Player2 加入匹配池 → 匹配成功
 一方退出 → 通知对方 → 场景销毁
 ```
 
+## 🧪 测试
+
+```bash
+cd backend
+
+# 单元测试：匹配规则边界、WebSocket 会话管理、confirm.lua 返回值契约
+# （ConfirmLuaScriptTest 需要本地 Redis，不可用时自动跳过）
+./mvnw test
+
+# 20 人并发匹配模拟：在随机端口真实启动应用，20 个虚拟玩家
+# 先连 WS 再并发 join → 并发 confirm → 校验无重复配对、双方进入同一场景，
+# 并输出匹配耗时统计（需本地 MySQL + Redis）
+./mvnw test -Dsimulate=true -Dtest=MatchSimulationTest
+```
+
+实测结果（本机 20 人并发一次运行）：20/20 匹配成功（10 对）、0 重复配对、20/20 进入场景，join → 进入场景全流程 443ms。
+
 ## ⚠️ 已知问题与解决方案
 
 详见 `backend/bug记录.txt`，包含以下问题的分析和解决方案：
